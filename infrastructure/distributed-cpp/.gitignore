@@ -1,0 +1,6 @@
+.env
+/apps/local/
+/build/
+/runtime/
+/test-results/
+__pycache__/

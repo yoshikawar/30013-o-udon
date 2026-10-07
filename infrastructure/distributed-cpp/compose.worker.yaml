@@ -1,0 +1,27 @@
+services:
+  worker:
+    image: udon-distributed-worker:local
+    build:
+      context: .
+      target: worker
+      args:
+        APP_DIR: ${APP_DIR:-apps/example}
+    init: true
+    restart: "no"
+    environment:
+      ROLE: worker
+      NODE_ID: ${NODE_ID:?Set NODE_ID in .env}
+      SEED: ${SEED:?Set SEED in .env}
+      CLUSTER_SECRET: ${CLUSTER_SECRET:?Set CLUSTER_SECRET in .env}
+      MAIN_HOST: ${MAIN_HOST:?Set MAIN_HOST to the main PC wired IPv4 address}
+      PORT: "39001"
+      JOB_TIMEOUT_MS: ${JOB_TIMEOUT_MS:-10000}
+    volumes:
+      - worker-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    working_dir: /state
+    stop_grace_period: 15s
+volumes:
+  worker-state:

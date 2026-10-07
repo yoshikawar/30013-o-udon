@@ -1,0 +1,8 @@
+.git
+.env
+build
+runtime
+test-results
+**/build
+**/.git
+**/.env
