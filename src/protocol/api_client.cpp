@@ -45,6 +45,24 @@ std::string operation_name(const std::string& path, const std::string& phase) {
     return "actions-or-state";
 }
 
+std::optional<bool> failed_post_outcome(const Error& error) {
+    switch (error.code) {
+        case ErrorCode::DnsFailure:
+        case ErrorCode::ConnectionRefused:
+        case ErrorCode::ConnectionTimeout:
+        case ErrorCode::DeadlineExceeded:
+            return false;
+        default:
+            return std::nullopt;
+    }
+}
+
+std::optional<bool> http_post_outcome(long status) {
+    if (status >= 200 && status < 300) return true;
+    if (status >= 400 && status < 500) return false;
+    return std::nullopt;
+}
+
 }  // namespace
 
 ProconApiClient::ProconApiClient(HttpTransport& transport, ApiConfig config,
@@ -168,8 +186,9 @@ Result<HttpResponse> ProconApiClient::request(
         entry.response_classification = "transport-error";
     }
     if (method == HttpMethod::Post) {
-        entry.submission_attempted = response && response.value().status >= 200
-            && response.value().status < 300 ? std::optional<bool>{true} : std::nullopt;
+        entry.submission_attempted = response
+            ? http_post_outcome(response.value().status)
+            : failed_post_outcome(response.error());
     }
     // A successful HTTP response is not yet a successful application-level POST:
     // callers still have to validate the response body. They write the final
@@ -251,15 +270,16 @@ Result<bool> ProconApiClient::post_agent_kinds(
     std::lock_guard lock(post_mutex_);
     auto response = request(HttpMethod::Post, "/agent", body.value(), deadline, phase);
     if (!response) {
-        if (response.error().code == ErrorCode::TransferTimeout ||
-            response.error().code == ErrorCode::Disconnected) {
-            return Result<bool>::failure({ErrorCode::UnknownResponse, "POST /agent outcome is unknown"});
-        }
-        return Result<bool>::failure(redact(response.error()));
+        auto error = redact(response.error());
+        error.submission_attempted = failed_post_outcome(error);
+        if (!error.submission_attempted.has_value())
+            return Result<bool>::failure(
+                {ErrorCode::UnknownResponse, "POST /agent outcome is unknown"});
+        return Result<bool>::failure(std::move(error));
     }
     if (response.value().status != 200) {
         auto error = http_error(response.value());
-        error.submission_attempted = std::nullopt;
+        error.submission_attempted = http_post_outcome(response.value().status);
         return Result<bool>::failure(std::move(error));
     }
     log_post_response("/agent", response.value(), phase, true, "accepted", std::nullopt);
@@ -294,16 +314,17 @@ Result<std::int32_t> ProconApiClient::post_actions(
     std::lock_guard lock(post_mutex_);
     auto response = request(HttpMethod::Post, "/", body.value(), deadline, phase, local_submission_id);
     if (!response) {
-        const auto code = response.error().code;
-        if (code == ErrorCode::TransferTimeout || code == ErrorCode::Disconnected) {
+        auto error = redact(response.error());
+        error.submission_attempted = failed_post_outcome(error);
+        if (!error.submission_attempted.has_value()) {
             return Result<std::int32_t>::failure(
                 {ErrorCode::UnknownResponse, "POST outcome is unknown", std::nullopt, std::nullopt});
         }
-        return Result<std::int32_t>::failure(redact(response.error()));
+        return Result<std::int32_t>::failure(std::move(error));
     }
     if (response.value().status != 200) {
         auto error = http_error(response.value());
-        error.submission_attempted = std::nullopt;
+        error.submission_attempted = http_post_outcome(response.value().status);
         return Result<std::int32_t>::failure(std::move(error));
     }
     if (response.value().body.empty()) {

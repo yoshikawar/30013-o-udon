@@ -81,6 +81,9 @@ private:
 
 [[nodiscard]] std::string classify_worker_termination(const std::string& termination);
 
+// A rejected POST is safe to repeat only when the failure is transient.
+[[nodiscard]] bool retryable_rejected_post(protocol::ErrorCode code);
+
 class AutoCompetitionClient {
 public:
     AutoCompetitionClient(protocol::ProconApiClient& api, AutoClientConfig config,

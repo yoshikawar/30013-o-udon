@@ -1,3 +1,4 @@
+#include "hexa_udon/app/auto_client.hpp"
 #include "hexa_udon/solver.hpp"
 #include "hexa_udon/simulator/simulator.hpp"
 
@@ -7,6 +8,24 @@
 // solver を o-udon の型で動かしたときの最低限の確認
 int main() {
     using namespace hexa_udon;
+
+    // A POST known to have been rejected is retried only for transient failures.
+    for (const auto code : {protocol::ErrorCode::DnsFailure,
+                            protocol::ErrorCode::ConnectionRefused,
+                            protocol::ErrorCode::ConnectionTimeout,
+                            protocol::ErrorCode::AccessTime,
+                            protocol::ErrorCode::Http429}) {
+        if (!app::retryable_rejected_post(code)) return 100;
+    }
+    for (const auto code : {protocol::ErrorCode::Http4xx,
+                            protocol::ErrorCode::Auth,
+                            protocol::ErrorCode::Http5xx,
+                            protocol::ErrorCode::TransferTimeout,
+                            protocol::ErrorCode::Disconnected,
+                            protocol::ErrorCode::DeadlineExceeded}) {
+        if (app::retryable_rejected_post(code)) return 101;
+    }
+
     auto map = std::move(core::MapDefinition::create(8, 8,
         std::vector<core::Terrain>(64, core::Terrain::Plain)).value());
     // 系列番号は 0 始まりでなくても、シミュレーションの結果は元の番号で返す
