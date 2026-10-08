@@ -1,0 +1,27 @@
+services:
+  worker:
+    image: hexa-udon:local
+    build:
+      context: .
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?Set SOURCE_REVISION to git rev-parse --short=12 HEAD}
+    init: true
+    restart: "no"
+    environment:
+      ROLE: worker
+      PORT: "39001"
+      HEXA_LAN_WORKER_SECRET: ${HEXA_LAN_WORKER_SECRET:?Set worker-only secret in .env}
+      WORKER_INDEX: ${WORKER_INDEX:-0}
+      WORKER_COUNT: ${WORKER_COUNT:-1}
+      RUN_ID: ${RUN_ID:-docker}
+    ports:
+      - "${BIND_IP:?Set BIND_IP to this worker PC wired IPv4}:${HOST_PORT:-39001}:39001"
+    volumes:
+      - worker-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 15s
+
+volumes:
+  worker-state:

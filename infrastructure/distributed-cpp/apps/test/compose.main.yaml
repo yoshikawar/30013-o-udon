@@ -1,0 +1,28 @@
+services:
+  main:
+    image: hexa-udon:local
+    build:
+      context: .
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?Set SOURCE_REVISION to git rev-parse --short=12 HEAD}
+    init: true
+    restart: "no"
+    environment:
+      ROLE: main
+      VENUE_BASE_URL: ${VENUE_BASE_URL:?Set venue URL in .env}
+      PROCON_TOKEN: ${PROCON_TOKEN:?Set official token in .env}
+      HEXA_LAN_WORKER_SECRET: ${HEXA_LAN_WORKER_SECRET:?Set worker-only secret in .env}
+      LAN_WORKER_1: ${LAN_WORKER_1:?Set first worker wired IPv4 and port}
+      LAN_WORKER_2: ${LAN_WORKER_2:-}
+      SEED: ${SEED:-30013}
+      SAFETY_SECONDS: ${SAFETY_SECONDS:-3}
+      EXECUTE: ${EXECUTE:-false}
+    volumes:
+      - main-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 15s
+
+volumes:
+  main-state:
