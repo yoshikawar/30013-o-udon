@@ -1,5 +1,6 @@
 #include "hexa_udon/app/lan_worker.hpp"
-#include "hexa_udon/optimizer/daily_deadline_policy.hpp"
+#include "hexa_udon/solver.hpp"
+#include "hexa_udon/simulator/simulator.hpp"
 #include "hexa_udon/protocol/json_codec.hpp"
 #include "hexa_udon/protocol/request_id_digest.hpp"
 #include "hexa_udon/protocol/file_security.hpp"
@@ -33,7 +34,7 @@ constexpr auto default_reply_grace = std::chrono::milliseconds{100};
 #ifndef HEXA_UDON_BUILD_FINGERPRINT
 #define HEXA_UDON_BUILD_FINGERPRINT "unknown"
 #endif
-constexpr std::string_view evaluator_identity = "daily-improvement-candidate-v1";
+constexpr std::string_view evaluator_identity = "solver-v1";
 
 std::string hex_digest(std::string_view value) {
     // This is an identity/MAC token for the local protocol, not a password
@@ -219,11 +220,6 @@ std::optional<DecodedInput> decode_input(const nlohmann::json& request, std::str
         if (types.size() != daily.own_agents.size() || daily.own_agents.size() != match.initial_agent_positions.size()) {
             error = "agent count mismatch"; return std::nullopt;
         }
-        const auto size = static_cast<std::size_t>(match.map.height());
-        const auto supply = static_cast<std::size_t>(std::count(types.begin(), types.end(), core::AgentKind::Supply));
-        if ((size != 16 && size != 24 && size != 32) || (size == 32 && supply != 1 && supply != 3)) {
-            error = "type allowlist rejected"; return std::nullopt;
-        }
         DecodedInput decoded{std::move(match), std::move(daily), std::move(progress), std::move(types),
                               input.at("plannerSeed"), std::chrono::milliseconds{input.at("workerBudgetMs").get<std::int64_t>()}};
         if (decoded.budget.count() <= 0 || decoded.budget > std::chrono::minutes{1}) { error = "invalid worker budget"; return std::nullopt; }
@@ -234,7 +230,7 @@ std::optional<DecodedInput> decode_input(const nlohmann::json& request, std::str
     } catch (...) { error = "planner input schema invalid"; return std::nullopt; }
 }
 
-nlohmann::json score_json(const planner::OfficialScore& score) {
+nlohmann::json score_json(const simulator::OfficialScore& score) {
     return {score.total_unique_brands, score.cumulative_daily_unique_brands, score.total_bowls};
 }
 
@@ -517,116 +513,61 @@ int run_lan_worker(const LanWorkerConfig& config, const std::function<bool()>& s
                         ::close(client);
                         continue;
                     }
-                    const planner::PlannerInput planner_input{decoded->match, decoded->daily, decoded->progress};
-                    planner::PlannerConfig planner_config{2000, decoded->seed};
-                    auto baseline = planner::make_greedy_plan(planner_input, planner_config, deadline);
-                    if (!baseline) {
+                    // solver で計画する。worker ごとに乱数の種を変えて、main PC と違う解を探す
+                    namespace m = solver;
+                    m::loadProblem(decoded->match);
+                    m::rng.x = 88172645463325252ULL ^ (decoded->seed * 0x9E3779B97F4A7C15ULL);
+                    m::today = decoded->daily.day;
+                    m::interimSec = 0;
+                    const auto steps = decoded->match.day_steps.at(static_cast<std::size_t>(decoded->daily.day));
+                    const auto budget_ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+                    const auto planned = m::planDay(m::agentsOf(decoded->daily.own_agents), m::statusOf(decoded->daily.traffic),
+                                                    std::vector<char>(m::B, 0), steps,
+                                                    decoded->daily.day + 1 == static_cast<core::Quantity>(decoded->match.day_steps.size()),
+                                                    static_cast<double>(std::max<std::int64_t>(0, budget_ms)) * 0.85);
+                    const auto plan = m::toActionPlan(planned);
+                    const simulator::DaySimulationInput sim_input{decoded->match.map, decoded->match.spots, decoded->match.fuel_limit,
+                        steps, decoded->daily.own_agents, decoded->daily.traffic};
+                    const auto simulation = simulator::simulate_day(sim_input, plan);
+                    const auto encoded = protocol::encode_actions(plan);
+                    if (!simulation || !encoded) {
                         diagnostics.phase("planner", "failed", "planner-failure", 0);
-                        reply = response_failure("baseline-planner-failure", "planner_failure");
+                        reply = response_failure("solver-plan-invalid", "planner_failure");
                     } else {
-                        planner::RefuelPlannerConfig refuel_config{};
-                        refuel_config.seed = decoded->seed;
-                        auto refuel = planner::make_refuel_plan(planner_input, baseline.value(), refuel_config, deadline);
-                        if (!refuel) {
-                            diagnostics.phase("planner", "failed", "planner-failure", 0);
-                            reply = response_failure("refuel-planner-failure", "planner_failure");
-                        } else {
-                            optimizer::OptimizerConfig optimizer_config{};
-                            optimizer_config.seed = decoded->seed;
-                            optimizer_config.prefer_daily_readiness_on_tie = true;
-                            auto optimized = optimizer::optimize(planner_input, baseline.value(), refuel.value(),
-                                                                 optimizer_config, deadline);
-                            if (!optimized) {
-                                diagnostics.phase("planner", "failed", "planner-failure", 0);
-                                reply = response_failure("optimizer-failure", "planner_failure");
-                            } else {
-                                const auto encoded = protocol::encode_actions(optimized.value().plan);
-                                if (!encoded) {
-                                    diagnostics.phase("planner", "failed", "planner-failure", 0);
-                                    reply = response_failure("action-encoding-failure", "planner_failure");
-                                } else {
-                                    const auto actions = nlohmann::json::parse(encoded.value());
-                                    // Readiness must use the same observed acquisitions as the
-                                    // main PC strict revalidation, not the planner route claim.
-                                    std::vector<std::vector<std::size_t>> visited(
-                                        optimized.value().simulation.acquisitions.size());
-                                    for (std::size_t index = 0; index < visited.size(); ++index)
-                                        visited[index] = optimized.value().simulation.acquisitions[index].spot_indices;
-                                    const auto readiness = planner::daily_readiness(
-                                        decoded->match, decoded->daily,
-                                        optimized.value().simulation, visited);
-                                    const nlohmann::json end_state = agents_json(
-                                        optimized.value().simulation.end_agents);
-                                    const nlohmann::json start_state = agents_json(decoded->daily.own_agents);
-                                    const auto action_hash = value_hash(actions);
-                                    const auto plan_hash = value_hash({{"actions", actions}, {"types", decoded->types}});
-                                    const auto termination = [&] {
-                                        switch (optimized.value().termination) {
-                                        case optimizer::OptimizerTermination::Deadline:
-                                            return optimized.value().best_candidate_at_deadline
-                                                && optimized.value().best_candidate_strict_verified
-                                                ? std::string{"deadline_exhausted_best_available"}
-                                                : std::string{"deadline_exhausted"};
-                                        case optimizer::OptimizerTermination::Completed:
-                                            return std::string{"completed"};
-                                        case optimizer::OptimizerTermination::IterationLimit:
-                                            return std::string{"iteration_limit"};
-                                        case optimizer::OptimizerTermination::Fallback:
-                                            return std::string{"fallback"};
-                                        case optimizer::OptimizerTermination::InvalidLimit:
-                                            return std::string{"planner_failure"};
-                                        }
-                                        return std::string{"planner_failure"};
-                                    }();
-                                    reply = {{"protocolVersion", protocol_version}, {"success", true},
-                                             {"requestId", request.value("requestId", "")},
-                                             {"requestIdDigest", protocol::request_id_digest_or_missing(request.value("requestId", nlohmann::json(nullptr)))},
-                                             {"evaluatorVersion", request.value("evaluatorVersion", "")},
-                                             {"policyIdentity", request.value("policyIdentity", nlohmann::json(nullptr))},
-                                             {"mapIdentity", map_identity_digest(decoded->match.map)},
-                                             {"plannerSeed", decoded->seed},
-                                             {"workerIndex", request.value("workerIndex", -1)},
-                                             {"workerCount", request.value("workerCount", 0)},
-                                             {"workerBuildFingerprint", worker_build_fingerprint()},
-                                             {"workerProtocolSchemaVersion", worker_protocol_schema_version()},
-                                             {"workerEvaluatorIdentity", worker_evaluator_identity()},
-                                             {"workerProfileIdentity", value_hash(request.value("policyIdentity", nlohmann::json(nullptr)))},
-                                             {"logicalWorkerIndex", config.worker_index},
-                                             {"logicalWorkerCount", config.worker_count},
-                                             {"payloadHash", value_hash(request.at("plannerInput"))},
-                                             {"inputHash", value_hash(request.at("plannerInput"))},
-                                             {"startStateHash", value_hash(start_state)},
-                                             {"candidateValidated", true}, {"actions", actions},
-                                             {"actionHash", action_hash}, {"planHash", plan_hash},
-                                             {"endState", end_state}, {"endStateHash", value_hash(end_state)},
-                                             {"officialScore", score_json(optimized.value().score)},
-                                             {"readiness", {readiness.uncollected_spot_reachability,
-                                                readiness.fuel_reserve, readiness.patrol_dispersion,
-                                                readiness.rendezvous_readiness}},
-                                             {"evaluatedCandidates", optimized.value().generated_candidates},
-                                             {"validCandidates", optimized.value().valid_candidates},
-                                             {"acceptedCandidates", optimized.value().accepted_candidates},
-                                             {"runtimeUs", optimized.value().elapsed.count()},
-                                             // These fields describe the worker's local planner
-                                             // deadline.  They must not be interpreted as claims
-                                             // about the main PC's shared hard deadline.
-                                             {"workerTermination", termination},
-                                             {"workerBestCandidateAtLocalDeadline",
-                                                optimized.value().best_candidate_at_deadline},
-                                             {"workerBestCandidateStrictVerified",
-                                                optimized.value().best_candidate_strict_verified},
-                                             // Keep the old names in replies for older readers;
-                                             // the main PC no longer compares them as claims.
-                                             {"termination", termination},
-                                             {"bestCandidateAtDeadline", optimized.value().best_candidate_at_deadline},
-                                             {"bestCandidateStrictVerified", optimized.value().best_candidate_strict_verified},
-                                             {"failureReason", ""},
-                                             {"futureSnapshotRead", false}, {"lookahead", 0},
-                                             {"networkRequests", 0}, {"postCount", 0}};
-                                    diagnostics.phase("planner", "completed", termination == "fallback" ? "fallback" : "", 0);
-                                }
-                            }
-                        }
+                        const auto actions = nlohmann::json::parse(encoded.value());
+                        const nlohmann::json end_state = agents_json(simulation.value().end_agents);
+                        const nlohmann::json start_state = agents_json(decoded->daily.own_agents);
+                        const auto action_hash = value_hash(actions);
+                        const auto plan_hash = value_hash({{"actions", actions}, {"types", decoded->types}});
+                        const std::string termination = "completed";
+                        reply = {{"protocolVersion", protocol_version}, {"success", true},
+                                 {"requestId", request.value("requestId", "")},
+                                 {"requestIdDigest", protocol::request_id_digest_or_missing(request.value("requestId", nlohmann::json(nullptr)))},
+                                 {"evaluatorVersion", request.value("evaluatorVersion", "")},
+                                 {"policyIdentity", request.value("policyIdentity", nlohmann::json(nullptr))},
+                                 {"mapIdentity", map_identity_digest(decoded->match.map)},
+                                 {"plannerSeed", decoded->seed},
+                                 {"workerIndex", request.value("workerIndex", -1)},
+                                 {"workerCount", request.value("workerCount", 0)},
+                                 {"workerBuildFingerprint", worker_build_fingerprint()},
+                                 {"workerProtocolSchemaVersion", worker_protocol_schema_version()},
+                                 {"workerEvaluatorIdentity", worker_evaluator_identity()},
+                                 {"workerProfileIdentity", value_hash(request.value("policyIdentity", nlohmann::json(nullptr)))},
+                                 {"logicalWorkerIndex", config.worker_index},
+                                 {"logicalWorkerCount", config.worker_count},
+                                 {"payloadHash", value_hash(request.at("plannerInput"))},
+                                 {"inputHash", value_hash(request.at("plannerInput"))},
+                                 {"startStateHash", value_hash(start_state)},
+                                 {"candidateValidated", true}, {"actions", actions},
+                                 {"actionHash", action_hash}, {"planHash", plan_hash},
+                                 {"endState", end_state}, {"endStateHash", value_hash(end_state)},
+                                 {"officialScore", score_json(simulator::official_score(decoded->progress, simulation.value()))},
+                                 {"workerTermination", termination},
+                                 {"termination", termination},
+                                 {"failureReason", ""},
+                                 {"futureSnapshotRead", false}, {"lookahead", 0},
+                                 {"networkRequests", 0}, {"postCount", 0}};
+                        diagnostics.phase("planner", "completed", "", 0);
                     }
                 }
             }

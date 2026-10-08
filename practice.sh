@@ -111,8 +111,6 @@ run_client() {
   ./build/hexa_udon auto \
     --base-url "https://procon37arena.online" \
     --token-env PROCON_TOKEN \
-    --profile-set v2 \
-    --planner daily-improvement \
     --max-get-retries 200 \
     --execute \
     2>&1 | tee run/client-output.log

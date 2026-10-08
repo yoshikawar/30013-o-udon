@@ -1,0 +1,2 @@
+# Windows で clone しても、シェルスクリプトは LF のまま取り出す（CRLF だと WSL・Linux で起動できない）
+*.sh text eol=lf
