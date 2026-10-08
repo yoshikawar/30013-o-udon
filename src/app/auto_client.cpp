@@ -158,6 +158,13 @@ nlohmann::json canonical_planner_input(const core::MatchConfig& config,
 
 }  // namespace
 
+bool retryable_rejected_post(protocol::ErrorCode code) {
+    using protocol::ErrorCode;
+    return code == ErrorCode::DnsFailure || code == ErrorCode::ConnectionRefused ||
+           code == ErrorCode::ConnectionTimeout || code == ErrorCode::AccessTime ||
+           code == ErrorCode::Http429;
+}
+
 protocol::SteadyTime SystemAppClock::now() const { return std::chrono::steady_clock::now(); }
 std::chrono::system_clock::time_point SystemAppClock::wall_now() const {
     return std::chrono::system_clock::now();
@@ -711,6 +718,40 @@ RunResult AutoCompetitionClient::run() {
             // 計画ができるまでの保険として、まず全員が待つ計画を出す（procon2026 の client と同じ）
             auto submitted = competition.submit_safe_wait(
                 config_.mode == RunMode::DryRun, deadline.stop_at);
+            auto submit_backoff = std::min(
+                std::max(std::chrono::milliseconds{1}, config_.polling_interval),
+                std::chrono::milliseconds{250});
+            while (!submitted && submitted.error().submission_attempted == false &&
+                   retryable_rejected_post(submitted.error().code) && !stop_requested_()) {
+                const auto wait_duration = poll_wait_for(
+                    submitted.error(), submit_backoff, std::chrono::milliseconds{1});
+                const auto retry_at = clock_.now() + wait_duration;
+                if (retry_at >= deadline.stop_at) break;
+
+                protocol::OperationLogEntry retry_log;
+                retry_log.timestamp_utc = protocol::utc_timestamp();
+                retry_log.operation = "daily-submit";
+                retry_log.method = "POST";
+                retry_log.path = "/";
+                retry_log.endpoint = "/";
+                retry_log.phase = "daily-submit";
+                retry_log.result = "retry-scheduled";
+                retry_log.response_classification = safe_poll_classification(submitted.error().code);
+                retry_log.backoff_reason = submitted.error().retry_after_ms
+                    ? "retry-after" : "bounded-exponential-backoff";
+                retry_log.retry_after_ms = submitted.error().retry_after_ms;
+                retry_log.retry_wait_ms = wait_duration.count();
+                retry_log.deadline_remaining_ms = std::max<std::int64_t>(0,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        deadline.stop_at - clock_.now()).count());
+                retry_log.submission_attempted = false;
+                logger_->write(retry_log);
+
+                clock_.wait_until(retry_at);
+                if (clock_.now() >= deadline.stop_at || stop_requested_()) break;
+                submitted = competition.submit_safe_wait(false, deadline.stop_at);
+                submit_backoff = std::min(submit_backoff * 2, std::chrono::milliseconds{2000});
+            }
             if (!submitted) {
                 log_daily_failure(daily.value().day, "simulation_or_transport_failure",
                                   submitted.error().message, submitted.error().submission_attempted,

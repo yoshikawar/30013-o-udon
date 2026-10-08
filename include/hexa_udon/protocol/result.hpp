@@ -9,8 +9,8 @@ struct Error {
     ErrorCode code;
     std::string message;
     std::optional<std::int64_t> retry_after_ms;
-    // false: POST was not started, true: a POST was started and received a response,
-    // nullopt: the outcome after starting a POST is unknown.
+    // false: the POST was definitely not accepted (not sent, or explicitly rejected),
+    // true: the POST was accepted, nullopt: whether it was accepted is unknown.
     std::optional<bool> submission_attempted;
     Error(ErrorCode error_code, std::string error_message,
           std::optional<std::int64_t> retry_after = std::nullopt,
