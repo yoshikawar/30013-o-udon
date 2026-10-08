@@ -1,6 +1,6 @@
 #include "hexa_udon/app/auto_client.hpp"
-#include "hexa_udon/app/production_profile.hpp"
 #include "hexa_udon/app/lan_worker.hpp"
+#include "hexa_udon/solver.hpp"
 #include "hexa_udon/protocol/file_security.hpp"
 
 #include <nlohmann/json.hpp>
@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -61,41 +62,27 @@ struct Options {
     std::filesystem::path session_directory = "run/session";
     std::filesystem::path log_directory = "run/log";
     std::optional<std::string> types;
-    std::optional<std::filesystem::path> profile;
-    std::optional<std::string> profile_set;
-    bool profile_override = false;
-    bool daily_deadline_policy = false;
     bool execute = false;
     std::int64_t poll_ms = 750;
     std::int64_t connect_timeout_ms = 2000;
     std::int64_t total_timeout_ms = 5000;
-    std::int64_t safety_seconds = 5;
+    std::int64_t safety_seconds = 3;
     std::size_t max_get_retries = 8;
     std::string log_level = "info";
-    std::string planner = "wait";
-    std::string type_selector = "fixed";
-    std::int64_t type_selector_ms = 3000;
-    std::size_t type_selector_max_supply = 1;
-    std::size_t type_selector_min_supply = 0;
-    std::int64_t planner_ms = 1500;
-    std::size_t planner_candidates = 2000;
+    std::int64_t kind_ms = 0;
+    std::int64_t interim_ms = 3000;
     std::uint64_t planner_seed = 30013;
-    std::int64_t refuel_ms = 2000;
-    std::size_t refuel_candidates = 2000;
-    std::size_t rendezvous_candidates = 4000;
-    std::size_t max_refuels = 2;
-    std::int64_t optimizer_ms = 5000;
-    std::size_t optimizer_iterations = 10000;
     std::optional<std::string> worker_listen;
     std::string worker_token_environment;
     std::filesystem::path worker_log;
     std::string run_id;
     std::size_t worker_index = 0;
     std::size_t worker_count = 1;
-    std::string worker_profile_identity = "profile-set-v2";
-    std::string worker_evaluator_identity = "daily-improvement-candidate-v1";
+    std::string worker_profile_identity = "solver";
+    std::string worker_evaluator_identity = "solver-v1";
     std::vector<std::string> lan_worker_values;
     std::int64_t lan_worker_timeout_ms = 0;
+    std::int64_t threads = 0;
 };
 
 void usage() {
@@ -104,21 +91,15 @@ void usage() {
               << "  hexa_udon auto --base-url URL [--execute] [--types 0,0,0,1] [options]\n"
               << "  hexa_udon recover --base-url URL [options] (dry-run by default)\n"
               << "  hexa_udon show-state --session-dir DIR\n"
-              << "  hexa_udon validate-profile --profile FILE (offline; no token or HTTP)\n"
               << "  hexa_udon worker --listen 127.0.0.1:PORT --worker-token-env NAME\n"
               << "  hexa_udon worker-preflight --listen HOST:PORT --worker-token-env NAME\n"
               << "Options: --token-env NAME --session-dir DIR --log-dir DIR --poll-ms N\n"
               << "         --connect-timeout-ms N --total-timeout-ms N --safety-seconds N\n"
               << "         --max-get-retries N --log-level info|warning|error\n";
-    std::cerr << "         --planner wait|greedy|greedy-refuel|optimized|daily-improvement --planner-ms N --planner-candidates N --seed N\n"
-              << "         --refuel-ms N --refuel-candidates N --rendezvous-candidates N --max-refuels N\n";
-    std::cerr << "         --daily-deadline-policy (manual daily-improvement opt-in; v2 profiles select their approved policy)\n";
-    std::cerr << "         --optimizer-ms N --optimizer-iterations N\n";
-    std::cerr << "         --type-selector fixed|prematch --type-selector-ms N --type-selector-max-supply 0|1|2\n";
-    std::cerr << "         --type-selector-min-supply 0|1|2 (default 0; must not exceed max)\n";
-    std::cerr << "         --profile FILE (approved v1/v2 policy; auto/recover; no tuning overrides; 32x32 profile uses [1,3])\n";
-    std::cerr << "         --profile-set v2 (auto only; select approved v2 profile from the first /setting response)\n";
-    std::cerr << "         --lan-worker HOST:PORT (daily-improvement opt-in; repeatable) --lan-worker-timeout-ms N\n";
+    std::cerr << "         --kind-ms N (types; default: size deadline 60/90/120 s minus elapsed and safety)\n"
+              << "         --interim-ms N (resubmit improved plans at this interval; 0 = final plan only) --seed N\n"
+              << "         --threads N (solver threads per day; default: half of the logical processors)\n";
+    std::cerr << "         --lan-worker HOST:PORT (repeatable) --lan-worker-timeout-ms N\n";
     std::cerr << "         --worker-index N --worker-count N --worker-log FILE --run-id ID\n";
 }
 
@@ -139,42 +120,22 @@ std::optional<Options> parse_options(int argc, char** argv) {
     options.command = argv[1];
     for (int index = 2; index < argc; ++index) {
         const std::string value = argv[index];
-        if (value.starts_with("--type-selector") || value.starts_with("--planner")
-            || value.starts_with("--refuel") || value.starts_with("--optimizer")
-            || value == "--seed" || value == "--rendezvous-candidates" || value == "--max-refuels"
-            || value == "--poll-ms" || value == "--safety-seconds"
-            || value == "--connect-timeout-ms" || value == "--total-timeout-ms")
-            options.profile_override = true;
         auto next = [&]() -> const char* { return ++index < argc ? argv[index] : nullptr; };
-        if (value == "--daily-deadline-policy") options.daily_deadline_policy = true;
-        else if (value == "--execute") options.execute = true;
+        if (value == "--execute") options.execute = true;
         else if (value == "--base-url") { const auto* item = next(); if (!item) return {}; options.base_url = item; }
         else if (value == "--token-env") { const auto* item = next(); if (!item) return {}; options.token_environment = item; }
         else if (value == "--session-dir") { const auto* item = next(); if (!item) return {}; options.session_directory = item; }
         else if (value == "--log-dir") { const auto* item = next(); if (!item) return {}; options.log_directory = item; }
         else if (value == "--types") { const auto* item = next(); if (!item) return {}; options.types = item; }
-        else if (value == "--profile") { const auto* item = next(); if (!item || options.profile) return {}; options.profile = item; }
-        else if (value == "--profile-set") { const auto* item = next(); if (!item || options.profile_set) return {}; options.profile_set = item; }
         else if (value == "--log-level") { const auto* item = next(); if (!item) return {}; options.log_level = item; }
         else if (value == "--poll-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.poll_ms)) return {}; }
         else if (value == "--connect-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.connect_timeout_ms)) return {}; }
         else if (value == "--total-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.total_timeout_ms)) return {}; }
         else if (value == "--safety-seconds") { const auto* item = next(); if (!item || !parse_integer(item, options.safety_seconds)) return {}; }
         else if (value == "--max-get-retries") { const auto* item = next(); if (!item || !parse_integer(item, options.max_get_retries)) return {}; }
-        else if (value == "--planner") { const auto* item = next(); if (!item) return {}; options.planner = item; }
-        else if (value == "--type-selector") { const auto* item = next(); if (!item) return {}; options.type_selector = item; }
-        else if (value == "--type-selector-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.type_selector_ms)) return {}; }
-        else if (value == "--type-selector-max-supply") { const auto* item = next(); if (!item || !parse_integer(item, options.type_selector_max_supply)) return {}; }
-        else if (value == "--type-selector-min-supply") { const auto* item = next(); if (!item || !parse_integer(item, options.type_selector_min_supply)) return {}; }
-        else if (value == "--planner-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.planner_ms)) return {}; }
-        else if (value == "--planner-candidates") { const auto* item = next(); if (!item || !parse_integer(item, options.planner_candidates)) return {}; }
+        else if (value == "--kind-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.kind_ms)) return {}; }
+        else if (value == "--interim-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.interim_ms)) return {}; }
         else if (value == "--seed") { const auto* item = next(); if (!item || !parse_integer(item, options.planner_seed)) return {}; }
-        else if (value == "--refuel-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.refuel_ms)) return {}; }
-        else if (value == "--refuel-candidates") { const auto* item = next(); if (!item || !parse_integer(item, options.refuel_candidates)) return {}; }
-        else if (value == "--rendezvous-candidates") { const auto* item = next(); if (!item || !parse_integer(item, options.rendezvous_candidates)) return {}; }
-        else if (value == "--max-refuels") { const auto* item = next(); if (!item || !parse_integer(item, options.max_refuels)) return {}; }
-        else if (value == "--optimizer-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_ms)) return {}; }
-        else if (value == "--optimizer-iterations") { const auto* item = next(); if (!item || !parse_integer(item, options.optimizer_iterations)) return {}; }
         else if (value == "--listen") { const auto* item = next(); if (!item || options.worker_listen) return {}; options.worker_listen = item; }
         else if (value == "--worker-token-env") { const auto* item = next(); if (!item || !options.worker_token_environment.empty()) return {}; options.worker_token_environment = item; }
         else if (value == "--worker-log") { const auto* item = next(); if (!item) return {}; options.worker_log = item; }
@@ -184,6 +145,7 @@ std::optional<Options> parse_options(int argc, char** argv) {
         else if (value == "--worker-profile-identity") { const auto* item = next(); if (!item) return {}; options.worker_profile_identity = item; }
         else if (value == "--worker-evaluator-identity") { const auto* item = next(); if (!item) return {}; options.worker_evaluator_identity = item; }
         else if (value == "--lan-worker") { const auto* item = next(); if (!item) return {}; options.lan_worker_values.emplace_back(item); }
+        else if (value == "--threads") { const auto* item = next(); if (!item || !parse_integer(item, options.threads)) return {}; }
         else if (value == "--lan-worker-timeout-ms") { const auto* item = next(); if (!item || !parse_integer(item, options.lan_worker_timeout_ms)) return {}; }
         else return std::nullopt;
     }
@@ -193,38 +155,20 @@ std::optional<Options> parse_options(int argc, char** argv) {
 bool valid(const Options& options) {
     if (options.command == "worker" || options.command == "worker-preflight") {
         return options.worker_listen.has_value() && !options.worker_token_environment.empty()
-            && !options.execute && options.base_url.empty() && options.profile == std::nullopt
-            && options.profile_set == std::nullopt && options.lan_worker_values.empty()
+            && !options.execute && options.base_url.empty() && options.lan_worker_values.empty()
             && options.token_environment == "PROCON_TOKEN"
             && app::parse_lan_worker_endpoint(*options.worker_listen).has_value()
             && options.worker_count > 0 && options.worker_index < options.worker_count;
     }
     if (!options.lan_worker_values.empty() && options.command != "auto") return false;
-    if (!options.lan_worker_values.empty() && options.planner != "daily-improvement"
-        && !options.profile && !options.profile_set) return false;
-    if (options.lan_worker_timeout_ms < 0 || options.lan_worker_timeout_ms > 30000) return false;
-    if (options.profile_set && (options.command != "auto" || *options.profile_set != "v2" || options.profile)) return false;
-    if (options.command == "validate-profile") return options.profile.has_value() && !options.execute && !options.profile_override;
-    if (options.daily_deadline_policy && (options.command != "auto" || options.planner != "daily-improvement" || options.profile)) return false;
+    if (options.lan_worker_timeout_ms < 0 || options.lan_worker_timeout_ms > 59000) return false;
     if (options.command == "show-state") return !options.execute;
     if (options.command != "check" && options.command != "auto" && options.command != "recover") return false;
     if (options.base_url.empty() || options.token_environment.empty()) return false;
     if (options.poll_ms < 500 || options.connect_timeout_ms <= 0 ||
-        options.total_timeout_ms < options.connect_timeout_ms || options.safety_seconds < 5 ||
+        options.total_timeout_ms < options.connect_timeout_ms || options.safety_seconds < 1 ||
         options.max_get_retries == 0) return false;
     if (options.log_level != "info" && options.log_level != "warning" && options.log_level != "error") return false;
-    if (options.planner != "wait" && options.planner != "greedy"
-        && options.planner != "greedy-refuel" && options.planner != "optimized"
-        && options.planner != "daily-improvement") return false;
-    if (options.type_selector != "fixed" && options.type_selector != "prematch") return false;
-    if (options.type_selector_ms < 1500) return false;
-    if (options.type_selector_max_supply > 2) return false;
-    if (options.type_selector_min_supply > options.type_selector_max_supply) return false;
-    if (options.type_selector == "prematch" && options.command != "auto") return false;
-    if (options.planner_ms <= 0 || options.planner_candidates == 0) return false;
-    if (options.refuel_ms <= 0 || options.refuel_candidates == 0
-        || options.rendezvous_candidates == 0 || options.max_refuels == 0) return false;
-    if (options.optimizer_ms <= 0 || options.optimizer_iterations == 0) return false;
     if (options.command == "check" && options.execute) return false;
     return true;
 }
@@ -272,12 +216,18 @@ int show_state(const std::filesystem::path& directory) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // 標準出力を書くたびに出す。パイプ（practice.sh の tee など）につなぐと既定ではためてから出すので、
+    // 提出や日ごとの結果の行が何十秒も遅れてログに出ていた
+    std::cout << std::unitbuf;
     if (argc == 1 || (argc > 1 && (std::string{argv[1]} == "--help" || std::string{argv[1]} == "help"))) {
         usage();
         return 0;
     }
     const auto options = parse_options(argc, argv);
     if (!options || !valid(*options)) { usage(); return 2; }
+    // 全部のスレッドを使うと通信や OS の処理が遅れるので、指定がなければ論理スレッド数の半分にする
+    hexa_udon::solver::threads = options->threads > 0 ? static_cast<int>(options->threads)
+        : std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
     if (options->command == "worker") {
         const auto endpoint = app::parse_lan_worker_endpoint(*options->worker_listen);
         if (!endpoint) { std::cerr << "worker requires a private or loopback listen address\n"; return 2; }
@@ -313,18 +263,6 @@ int main(int argc, char** argv) {
                   << " evaluatorIdentity=" << reply.payload.value("workerEvaluatorIdentity", "unknown")
                   << " profileIdentity=" << reply.payload.value("workerProfileIdentity", "unknown")
                   << " secretConfigured=true\n";
-        return 0;
-    }
-    if (options->profile) {
-        if ((options->command != "auto" && options->command != "recover" && options->command != "validate-profile") || options->profile_override) {
-            std::cerr << "Profile requires auto/recover and forbids tuning overrides (explicit --types remains allowed)\n";
-            return 2;
-        }
-        try { app::validate_production_profile(*options->profile); }
-        catch (const std::exception&) { std::cerr << "Invalid approved profile schema/identity\n"; return 2; }
-    }
-    if (options->command == "validate-profile") {
-        std::cout << "profile-schema=valid networkRequests=0 postCount=0\n";
         return 0;
     }
     if (options->command == "show-state") return show_state(options->session_directory);
@@ -381,47 +319,26 @@ int main(int argc, char** argv) {
     config.mode = options->execute ? app::RunMode::Execute : app::RunMode::DryRun;
     config.state_directory = options->session_directory;
     config.explicit_kinds = kinds;
-    config.profile_set_version = options->profile_set;
-    config.type_selector = options->type_selector == "prematch"
-        ? app::TypeSelectorMode::Prematch : app::TypeSelectorMode::Fixed;
-    config.type_selector_budget = std::chrono::milliseconds{options->type_selector_ms};
-    config.type_selector_max_supply = options->type_selector_max_supply;
-    config.type_selector_min_supply = options->type_selector_min_supply;
     config.type_submission_reserve = std::chrono::milliseconds{
         std::max<std::int64_t>(750, options->total_timeout_ms + 250)};
     config.polling_interval = std::chrono::milliseconds{options->poll_ms};
     config.safety_margin = std::chrono::seconds{options->safety_seconds};
     config.maximum_get_attempts = options->max_get_retries;
-    config.planner_mode = options->planner == "daily-improvement" ? app::PlannerMode::DailyImprovement
-        : options->planner == "optimized" ? app::PlannerMode::Optimized
-        : options->planner == "greedy-refuel" ? app::PlannerMode::GreedyRefuel
-        : options->planner == "greedy" ? app::PlannerMode::Greedy : app::PlannerMode::Wait;
-    config.daily_deadline_policy = options->daily_deadline_policy;
-    config.planner_budget = std::chrono::milliseconds{options->planner_ms};
-    config.planner_candidate_limit = options->planner_candidates;
+    config.kind_budget = std::chrono::milliseconds{options->kind_ms};
+    config.interim_seconds = static_cast<double>(options->interim_ms) / 1000.0;
     config.planner_seed = options->planner_seed;
-    config.refuel_budget = std::chrono::milliseconds{options->refuel_ms};
-    config.refuel_candidate_limit = options->refuel_candidates;
-    config.rendezvous_candidate_limit = options->rendezvous_candidates;
-    config.maximum_refuels_per_patrol = options->max_refuels;
-    config.optimizer_budget = std::chrono::milliseconds{options->optimizer_ms};
-    config.optimizer_iterations = options->optimizer_iterations;
     for (const auto& value : options->lan_worker_values) {
         const auto endpoint = app::parse_lan_worker_endpoint(value);
         if (!endpoint) { std::cerr << "Invalid private LAN worker endpoint\n"; return 2; }
         config.lan_workers.push_back(*endpoint);
     }
     config.lan_worker_timeout = std::chrono::milliseconds{options->lan_worker_timeout_ms};
-    if (!config.lan_workers.empty() && config.planner_mode != app::PlannerMode::DailyImprovement) {
-        std::cerr << "--lan-worker requires --planner daily-improvement\n"; return 2;
-    }
     if (!config.lan_workers.empty()) {
         config.lan_worker_secret_environment = "HEXA_LAN_WORKER_SECRET";
         if (std::getenv(config.lan_worker_secret_environment.c_str()) == nullptr) {
             std::cerr << "HEXA_LAN_WORKER_SECRET is required for --lan-worker\n"; return 2;
         }
     }
-    if (options->profile) app::apply_production_profile(config, *options->profile);
     app::AutoCompetitionClient client(api, std::move(config), clock,
         [] { return stop_requested != 0; }, std::cout, &logger);
     const auto result = client.run();

@@ -1,10 +1,8 @@
 #pragma once
 
 #include "hexa_udon/protocol/api_client.hpp"
-#include "hexa_udon/planner/greedy_planner.hpp"
 #include "hexa_udon/session/polling.hpp"
 #include "hexa_udon/session/session.hpp"
-#include "hexa_udon/optimizer/daily_deadline_policy.hpp"
 #include "hexa_udon/app/lan_worker.hpp"
 
 #include <chrono>
@@ -20,51 +18,26 @@ namespace hexa_udon::app {
 
 enum class RunMode { DryRun, Execute };
 enum class RunStatus { Completed, Stopped, RecoveryRequired, Failed };
-enum class PlannerMode { Wait, Greedy, GreedyRefuel, Optimized, DailyImprovement };
-enum class TypeSelectorMode { Fixed, Prematch };
 
+// 種別決めも毎日の計画も solver（include/hexa_udon/solver.hpp）で行う
 struct AutoClientConfig {
     std::string base_url;
     RunMode mode = RunMode::DryRun;
     std::filesystem::path state_directory;
     std::optional<std::vector<core::AgentKind>> explicit_kinds;
-    bool use_round_preset = true;
     std::chrono::milliseconds polling_interval{750};
-    std::chrono::seconds safety_margin{5};
+    // 締切のこれだけ前までに提出を終える（procon2026 の client と同じ）
+    std::chrono::seconds safety_margin{3};
     std::size_t maximum_get_attempts = 8;
-    PlannerMode planner_mode = PlannerMode::Wait;
-    bool daily_deadline_policy = false;
-    std::chrono::milliseconds planner_budget{1500};
-    std::size_t planner_candidate_limit = 2000;
+    // 種別決めに使う時間。0 なら盤の大きさごとの締切（16/24/32: 60/90/120 秒）までの残りから safety_margin を引く
+    std::chrono::milliseconds kind_budget{0};
+    // 良くなった計画を出し直す間隔（秒）
+    double interim_seconds = 3.0;
     std::uint64_t planner_seed = 30013;
-    std::chrono::milliseconds refuel_budget{2000};
-    std::size_t refuel_candidate_limit = 2000;
-    std::size_t rendezvous_candidate_limit = 4000;
-    std::size_t maximum_refuels_per_patrol = 2;
-    std::chrono::milliseconds optimizer_budget{5000};
-    std::size_t optimizer_iterations = 10000;
-    TypeSelectorMode type_selector = TypeSelectorMode::Fixed;
-    std::size_t type_selector_max_supply = 1;
-    std::size_t type_selector_min_supply = 0;
-    std::vector<std::size_t> type_selector_allowed_supply_counts;
-    std::chrono::milliseconds type_selector_budget{3000};
-    std::size_t type_selector_max_candidates = 35;
     std::chrono::milliseconds type_submission_reserve{6000};
-    double optimizer_initial_temperature = 8.0;
-    double optimizer_final_temperature = 0.05;
-    bool require_16x16_profile = false;
-    bool require_profile_target = false;
-    std::string profile_id;
-    int profile_version = 1;
-    std::optional<std::string> profile_set_version;
-    std::filesystem::path profile_set_directory{"config/profiles"};
-    nlohmann::json production_policy_identity = nullptr;
-    std::size_t required_map_height = 0;
-    std::size_t required_map_width = 0;
-    std::size_t required_agent_count = 0;
     std::vector<LanWorkerEndpoint> lan_workers;
     std::string lan_worker_secret_environment;
-    // Zero selects the size-specific Phase 50 cap; a positive value is an explicit override.
+    // 0 なら日の残り時間いっぱい worker に計画させる。正の値はその上限
     std::chrono::milliseconds lan_worker_timeout{0};
 };
 
@@ -103,8 +76,6 @@ private:
     int descriptor_ = -1;
 };
 
-[[nodiscard]] protocol::Result<std::vector<core::AgentKind>> round_preset(
-    std::size_t agent_count);
 [[nodiscard]] protocol::Result<std::vector<core::AgentKind>> parse_kind_list(
     const std::string& text);
 
@@ -115,8 +86,7 @@ public:
     AutoCompetitionClient(protocol::ProconApiClient& api, AutoClientConfig config,
                           AppClock& clock, std::function<bool()> stop_requested,
                           std::ostream& output,
-                          protocol::OperationLogger* logger = nullptr,
-                          const optimizer::DailyDeadlineStages* deadline_stages = nullptr);
+                          protocol::OperationLogger* logger = nullptr);
 
     [[nodiscard]] RunResult run();
 
@@ -142,7 +112,6 @@ private:
     std::ostream& output_;
     protocol::NullOperationLogger null_logger_;
     protocol::OperationLogger* logger_;
-    const optimizer::DailyDeadlineStages* deadline_stages_;
 };
 
 }  // namespace hexa_udon::app
