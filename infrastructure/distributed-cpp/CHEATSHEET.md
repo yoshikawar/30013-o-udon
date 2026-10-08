@@ -1,202 +1,194 @@
-# 3台通信 当日チートシート
+# hexa-udon 本番 Docker 3台通信 当日チートシート
 
-対象はWindows/WSLメイン1台、Windows/WSL worker 1台、Mac worker 1台。各PCでこの`distributed-cpp/`ディレクトリを開いて操作する。
+対象は Windows/WSL の main 1台、Windows/WSL worker 1台、Mac worker 1台。今回の本番コードは worker が TCP 39001 を待受し、main が各 worker へ接続する。旧 `cluster_bridge` サンプルとは通信方向が逆なので、以下はすべて `infrastructure/distributed-cpp/apps/test/` で実行する。
 
-起動順は自由。workerを先に起動しても、メインが起動するまで自動で再接続する。公式tokenや競技サーバーのURLは、この通信基盤の`.env`へ入れない。
+公式 API、公式 token、競技 POSTを扱うのは main だけ。worker には worker 専用 secret だけを置く。
 
 ## 0. 全PC共通
 
 Docker Desktopを起動する。WindowsはLinux containersとWSL integrationを有効にする。
 
 ```sh
+cd infrastructure/distributed-cpp/apps/test
 docker info --format '{{.ServerVersion}} {{.OSType}} {{.Architecture}}'
+git rev-parse --short=12 HEAD
 ```
 
-想定結果はWindows/WSLが`linux x86_64`または`linux amd64`、Macが`linux arm64`。各PCで個別にイメージをbuildする。
+3台で同じcommitをcheckoutし、最後のコマンドで表示された12文字を全 `.env` の `SOURCE_REVISION` に設定する。値が異なるworkerの候補はmainが採用しない。
 
-3台を同じ有線LANへ接続する。Wi-Fiは使わない。メインPCの有線IPv4を確認し、以下では`192.168.10.10`の部分を実値へ置き換える。
+3台を同じ有線LANへ接続する。以下の例ではmainを `192.168.10.10`、WSL workerを `192.168.10.20`、Mac workerを `192.168.10.30` とする。Docker/WSL内部IPではなく、各PCの有線IPv4へ置き換える。
 
-共通secretを1回だけ生成し、3台の`.env`へ同じ値を設定する。
+worker専用secretを1回だけ生成し、3台の `.env` に同じ値を設定する。
 
 ```sh
 openssl rand -hex 24
 ```
 
-secret、`.env`、公式tokenをGitへ追加したり、画面共有・ログへ貼ったりしない。
+`.env`、secret、公式tokenをGit、画面共有、ログへ出さない。
 
-## 1. メイン Windows/WSL
+## 1. worker 1: Windows/WSL
+
+```sh
+cp .env.worker.example .env
+```
+
+```dotenv
+SOURCE_REVISION=<3台で同じ12文字>
+BIND_IP=192.168.10.20
+HOST_PORT=39001
+HEXA_LAN_WORKER_SECRET=<3台共通のworker専用secret>
+WORKER_INDEX=0
+WORKER_COUNT=2
+RUN_ID=competition
+```
+
+Windows Firewallではmain PC (`192.168.10.10`) からのTCP 39001着信だけを許可する。
+
+```sh
+docker compose -f compose.worker.yaml config --quiet
+docker compose -f compose.worker.yaml up -d --build
+docker compose -f compose.worker.yaml logs -f
+```
+
+正常なら `worker=ready` と表示される。
+
+## 2. worker 2: Mac
+
+```sh
+cp .env.worker.example .env
+```
+
+```dotenv
+SOURCE_REVISION=<3台で同じ12文字>
+BIND_IP=192.168.10.30
+HOST_PORT=39001
+HEXA_LAN_WORKER_SECRET=<3台共通のworker専用secret>
+WORKER_INDEX=1
+WORKER_COUNT=2
+RUN_ID=competition
+```
+
+```sh
+docker compose -f compose.worker.yaml config --quiet
+docker compose -f compose.worker.yaml up -d --build
+docker compose -f compose.worker.yaml logs -f
+```
+
+正常なら `worker=ready` と表示される。worker 1/2の `WORKER_INDEX` は重複させず、どちらも `WORKER_COUNT=2` にする。
+
+## 3. main: Windows/WSL
 
 ```sh
 cp .env.main.example .env
 ```
 
-`.env`を編集する。
-
 ```dotenv
-NODE_ID=pc-main
-SEED=101
-APP_DIR=apps/example
-BIND_IP=192.168.10.10
-HOST_PORT=39001
-CLUSTER_SECRET=<3台共通secret>
-EXPECTED_WORKERS=2
-STARTUP_WAIT_MS=60000
-JOB_TIMEOUT_MS=10000
-APP_READ_TIMEOUT_MS=30000
+SOURCE_REVISION=<3台で同じ12文字>
+VENUE_BASE_URL=https://<当日の公式host>
+PROCON_TOKEN=<公式token>
+HEXA_LAN_WORKER_SECRET=<3台共通のworker専用secret>
+LAN_WORKER_1=192.168.10.20:39001
+LAN_WORKER_2=192.168.10.30:39001
+SEED=30013
+SAFETY_SECONDS=3
+EXECUTE=false
 ```
 
-`BIND_IP`にはWSLやDocker内部のIPではなく、WindowsメインPCの有線LAN IPv4を指定する。Windows Firewallでworker 2台からのTCP 39001着信を許可する。
-
-設定確認と起動：
+`LAN_WORKER_1` は `WORKER_INDEX=0`、`LAN_WORKER_2` は `WORKER_INDEX=1` のPCに合わせる。まず `EXECUTE=false` のままにする。この状態でも公式APIへのGETは行うが、POSTはしない。
 
 ```sh
 docker compose -f compose.main.yaml config --quiet
-docker compose -f compose.main.yaml up -d --build
-docker compose -f compose.main.yaml logs -f
+docker compose -f compose.main.yaml build
 ```
 
-待機中の正常表示：
+## 4. POSTなしのworker疎通確認
 
-```text
-main listening; waiting for workers
-```
-
-## 2. worker Windows/WSL
+main PCから各workerへpreflightする。これは公式APIへ接続せず、競技POSTもしない。
 
 ```sh
-cp .env.worker-wsl.example .env
+docker run --rm --env-file .env --entrypoint hexa_udon hexa-udon:local \
+  worker-preflight --listen 192.168.10.20:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 0 --worker-count 2
+
+docker run --rm --env-file .env --entrypoint hexa_udon hexa-udon:local \
+  worker-preflight --listen 192.168.10.30:39001 \
+  --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 1 --worker-count 2
 ```
 
-`.env`を編集する。
+両方で次の形式が出れば通信・secret・役割番号は一致している。`buildFingerprint` も3台の `SOURCE_REVISION` と一致することを確認する。
+
+```text
+worker-preflight=ok protocolSchemaVersion=1 buildFingerprint=<SOURCE_REVISION> workerIndex=0 workerCount=2 ... secretConfigured=true
+```
+
+## 5. mainのdry-run
+
+公式APIのGETと計画処理まで確認するが、まだPOSTはしない。
+
+```sh
+docker compose -f compose.main.yaml up
+```
+
+終了または `Ctrl-C` 後、ログに `warning=lan-worker`、`claim-mismatch`、`strict-revalidation-failed` がないことを確認する。dry-runの結果だけで実LAN本番完走を推定しない。
+
+## 6. 本番実行
+
+公式画面、時刻、token、URL、2台のworker、保存volumeを確認してからmain PCの `.env` だけを変更する。
 
 ```dotenv
-NODE_ID=pc-worker-wsl
-SEED=202
-APP_DIR=apps/example
-MAIN_HOST=192.168.10.10
-CLUSTER_SECRET=<3台共通secret>
-JOB_TIMEOUT_MS=10000
-```
-
-`MAIN_HOST`にはメインPCの有線LAN IPv4を指定する。
-
-```sh
-docker compose -f compose.worker.yaml config --quiet
-docker compose -f compose.worker.yaml up -d --build
-docker compose -f compose.worker.yaml logs -f
-```
-
-## 3. worker Mac
-
-```sh
-cp .env.worker-mac.example .env
-```
-
-`.env`を編集する。
-
-```dotenv
-NODE_ID=pc-worker-mac
-SEED=303
-APP_DIR=apps/example
-MAIN_HOST=192.168.10.10
-CLUSTER_SECRET=<3台共通secret>
-JOB_TIMEOUT_MS=10000
+EXECUTE=true
 ```
 
 ```sh
-docker compose -f compose.worker.yaml config --quiet
-docker compose -f compose.worker.yaml up -d --build
-docker compose -f compose.worker.yaml logs -f
+docker compose -f compose.main.yaml up
 ```
 
-## 4. 接続成功の判定
+`EXECUTE=true` は競技POSTを行う。mainの多重起動は禁止。同じSessionで `RecoveryRequired` が出たら自動再送せず、人手で公式状態と照合する。
 
-メインのログに、異なる2つのnode IDが表示されることを確認する。
-
-```text
-worker connected: pc-worker-wsl
-worker connected: pc-worker-mac
-starting application; workers=2
-```
-
-workerのログでは次を確認する。
-
-```text
-connected to main
-```
-
-サンプル疎通では、メインに両workerの`candidate`、`worker_done`、最後に`done`が表示されれば成功。
+## 7. 状態確認・停止・再起動
 
 ```sh
 docker compose -f compose.main.yaml ps
 docker compose -f compose.worker.yaml ps
+docker compose -f compose.main.yaml logs --tail=200
+docker compose -f compose.worker.yaml logs --tail=200
 ```
 
-worker Composeはホスト側ポートを公開しない。競技サーバーへの通信・公式token・POSTはメインプログラムだけが担当する。
-
-## 5. つながらないとき
-
-上から順に確認する。
-
-1. 3台の`.env`で`CLUSTER_SECRET`が完全に同じか。
-2. `NODE_ID`が3台で重複していないか。
-3. workerの`MAIN_HOST`がメインPCの有線IPv4か。
-4. メインの`BIND_IP`が同じ有線IPv4か。
-5. Windows FirewallでTCP 39001が許可されているか。
-6. メインのポートが公開されているか。
-
-```sh
-docker compose -f compose.main.yaml ps
-```
-
-7. workerからメインへ到達できるか。WSLとMacで実行する。
-
-```sh
-ping -c 3 192.168.10.10
-```
-
-8. 既に別プロセスが39001を使用していないか。
-
-WSL：
-
-```sh
-ss -ltnp | grep 39001
-```
-
-Mac：
-
-```sh
-lsof -nP -iTCP:39001 -sTCP:LISTEN
-```
-
-`main unavailable; reconnecting`は、メイン未起動・停止中・IP不正・Firewall遮断時に表示される。workerは停止せず再接続する。`worker registration rejected`はsecret不一致、node ID重複、identity不正を疑う。
-
-## 6. 再起動と停止
-
-設定変更後：
-
-```sh
-docker compose -f compose.main.yaml up -d --build --force-recreate
-docker compose -f compose.worker.yaml up -d --build --force-recreate
-```
-
-通常停止：
+通常停止ではnamed volumeを残す。`down -v` はSessionや状態を削除するため使用しない。
 
 ```sh
 docker compose -f compose.main.yaml down
 docker compose -f compose.worker.yaml down
 ```
 
-named volumeを保持するため、通常は`down -v`を使わない。
+sourceや `.env` を変更した場合だけ再buildする。
 
-## 7. 実プログラムへ交換するとき
-
-各PCの実プログラムを`apps/local/`へ置き、各`.env`を次へ変更する。
-
-```dotenv
-APP_DIR=apps/local
+```sh
+docker compose -f compose.main.yaml up --build --force-recreate
+docker compose -f compose.worker.yaml up -d --build --force-recreate
 ```
 
-その後、各PCで対応するComposeを`--build --force-recreate`付きで起動する。実プログラムはCMake installで`bin/application`を配置する必要がある。通信確認用サンプルで3台疎通を確認してから交換する。
+## 8. つながらないとき
 
-詳細仕様は[README](README.md)を参照。
+1. workerのログが `worker=ready` か。
+2. 3台の `SOURCE_REVISION` とworker専用secretが一致するか。
+3. `WORKER_INDEX` が0/1、`WORKER_COUNT` が両方2か。
+4. mainの `LAN_WORKER_1/2` の順序がindex 0/1と一致するか。
+5. workerの `BIND_IP` がそのPCの有線IPv4か。
+6. mainからworkerのTCP 39001へ到達できるか。
+7. worker側Firewallがmain PCからの着信を許可しているか。
+8. 39001が別プロセスに使われていないか。
+
+WSL:
+
+```sh
+ss -ltnp | grep 39001
+```
+
+Mac:
+
+```sh
+lsof -nP -iTCP:39001 -sTCP:LISTEN
+```
+
+詳細は本番コードの [`README.md`](apps/test/README.md) を参照する。
