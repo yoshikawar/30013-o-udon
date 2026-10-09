@@ -14,7 +14,7 @@
 
 ## 準備（全部の PC）
 
-1. **同じ commit を build する**。主 PC は worker の build の版（CMake を実行したときの git の commit）が自分と同じか照合し、違えば使わない。
+1. **clean worktreeで同じ commit を build する**。主 PC は worker の build の版（CMake を実行したときの git の commit）が自分と同じか照合し、違えば使わない。build fingerprint は git commit 由来で、未commit変更は識別しません。主 PC・全workerをclean worktreeかつ同一commitに揃えることが必須です。未commitのアルゴリズム変更を含む状態では、同じcommit表示でもbinaryの内容が異なり得るため、worker比較の安全な検証になりません。
    ```bash
    git pull
    cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
@@ -55,7 +55,7 @@
   --worker-token-env HEXA_LAN_WORKER_SECRET --worker-index 1 --worker-count 2
 ```
 
-`worker-preflight=ok` と、主 PC と同じ `buildFingerprint` が出れば使える。違う版が出たらその PC で build し直す。
+`worker-preflight=ok` と、主 PC と同じ `buildFingerprint` が出れば使える。ただし、これはclean worktreeかつ同一commitに揃えた上での確認です。違う版が出たらその PC で build し直す。未commit変更がある場合は fingerprint が同じでも安全性を確認できないため、本番利用しないでください。
 
 ```bash
 ./build-release/hexa_udon auto --base-url "$VENUE_BASE_URL" --token-env PROCON_TOKEN --execute \
@@ -72,7 +72,7 @@
 
 ### Windows（ゲーミング PC など）
 
-hexa_udon は Linux 用の通信を使うので、**WSL2（Ubuntu）の中で build・起動する**。WSL2 は既定では Windows とは別の IP を持ち、ほかの PC から直接届かない。次のどちらかで外から届くようにする（どちらも未検証。初めて使うときは preflight で確かめる）。
+hexa_udon は Linux 用の通信を使うので、**WSL2（Ubuntu）の中で build・起動する**。WSL2 は既定では Windows とは別の IP を持ち、ほかの PC から直接届かない。次のどちらかで外から届くようにする（OSの版、実機のネットワーク、Firewall、WSL設定に依存するため、記載の手順だけでは動作を保証しない。未検証の手順は実機で `worker-preflight` と実runを確認してから本番利用する）。
 
 **A. ミラーモード（Windows 11 22H2 以降）**: WSL が Windows と同じ IP を使う。
 1. `%UserProfile%\.wslconfig` に次を書き、PowerShell で `wsl --shutdown` してから WSL を開き直す
@@ -106,7 +106,7 @@ hexa_udon は Linux 用の通信を使うので、**WSL2（Ubuntu）の中で bu
 brew install cmake nlohmann-json curl
 ```
 
-そのまま build・起動できるはず（未検証）。初回の起動で「受信接続を許可しますか」と出たら許可する。
+そのまま build・起動できる可能性があるが未検証。OSの版、ネットワーク、Firewallに依存するため、実機で `worker-preflight` と実runを確認してから本番利用する。初回の起動で「受信接続を許可しますか」と出たら許可する。
 
 ### Linux
 
@@ -114,8 +114,9 @@ brew install cmake nlohmann-json curl
 
 ## 本番前の確認リスト
 
-- [ ] 全部の PC が同じ commit を build した（preflight の `buildFingerprint` が全部同じ）
+- [ ] 主 PC・全workerが clean worktree で同じ commit を build した（preflight の `buildFingerprint` が全部同じ。未commit変更がある状態は不可）
 - [ ] 全部の PC で `HEXA_LAN_WORKER_SECRET` が同じ
 - [ ] 全部の worker で `worker-preflight=ok`
+- [ ] OS別のネットワーク設定を実機で確認し、preflight成功後に実runも確認した
 - [ ] 練習場で worker をつないで 1 試合出て、`warning=lan-worker` が出ないか、出ても主 PC の計画で最後まで出せることを確かめた
 - [ ] 主 PC・worker とも、スリープ・自動更新・省電力を切った

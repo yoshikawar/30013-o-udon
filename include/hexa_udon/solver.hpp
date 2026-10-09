@@ -68,6 +68,8 @@ extern int today;                    // planDay を呼ぶ日（0 始まり）
 extern bool choosingKinds;           // 種別決めのシミュレーションの中で planDay を呼んでいる
 extern double interimSec;            // 途中の計画を出す間隔（秒）。0 なら出さない
 extern int threads;                  // 1 日の計画を同時に解くスレッドの数
+extern vector<int> yesterdayStatus;  // 前の日の道路の状態（翌日の道路の予測に使う。分からなければ空）
+extern int yesterdayDay;             // yesterdayStatus が何日目のものか
 
 // 方向: 0 左上, 1 右上, 2 右, 3 右下, 4 左下, 5 左（偶数行が右にずれる）
 const int DX_EVEN[6] = {0, 1, 1, 1, 0, -1}, DX_ODD[6] = {-1, 0, 1, 0, -1, -1};
@@ -139,6 +141,8 @@ vector<int> movesWithin(const vector<int>& cells, const vector<int>& status, int
 const double E_BRAND = 1000.0;
 const double E_END_SPOT = 0.8;
 const double E_TOMORROW = 500.0;
+const double E_TOMORROW_HEAVY = 30.0;
+const double EMIT_MIN_GAIN = 0.02;
 const double FUEL_TIGHT = 1.5;
 const double LNS_T0 = 2.0, LNS_T1 = 0.02;
 const double LNS_NOISE = 0.3;
@@ -247,7 +251,7 @@ struct MatchScore {
     }
 };
 // 全チームが同じ動きをすると仮定（交通量 = 自チームの滞在数）して全日程を回す
-MatchScore simulateMatch(const vector<int>& kinds, double timeMs);
+MatchScore simulateMatch(const vector<int>& kinds, double timeMs, bool busy = false);
 vector<int> solveKind(double timeMs);
 
 }  // namespace hexa_udon::solver

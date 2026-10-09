@@ -379,8 +379,9 @@ Day::Eval Day::evaluate(const vector<vector<int>>& routes) {
     double score = E_BRAND * r.brands + r.balls;
     long long busy = 0, fuelLeft = 0;
     if (!lastDay) {
+        const int need = min(FUEL_LIMIT, daySteps[min(dayIndex + 1, D - 1)]);
         for (int i : patrolIds) {
-            fuelLeft += r.end[i].fuel;
+            fuelLeft += min(r.end[i].fuel, need);
             if (spotAt[r.end[i].pos] >= 0) score += E_END_SPOT;
         }
         score += 0.5 * fuelLeft / ((long long)P * FUEL_LIMIT + 1);
