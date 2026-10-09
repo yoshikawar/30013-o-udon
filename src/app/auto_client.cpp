@@ -561,7 +561,7 @@ RunResult AutoCompetitionClient::run() {
                 - std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin).count());
         output_ << "type-selection=start mode=solver budgetMs=" << budget << '\n';
         // procon2026 の solver と同じく持ち時間の 8 割で選ぶ
-        const auto kinds = solver::solveKind(static_cast<double>(budget) * 0.8);
+        const auto kinds = solver::solveKind(static_cast<double>(budget) * 0.5);
         solver::choosingKinds = false;
         for (const int kind : kinds) selected_kinds.push_back(static_cast<core::AgentKind>(kind));
         protocol::OperationLogEntry selector_log;
@@ -780,6 +780,17 @@ RunResult AutoCompetitionClient::run() {
             // 計画が変わったときだけ出し直す。失敗したらその日はもう出さない
             const auto submit = [&](const std::vector<std::vector<int>>& plan, const std::string& source) {
                 if (submit_failure || plan == adopted || clock_.now() >= deadline.stop_at) return;
+                if (source == "solver-interim") {
+                    const auto candidate = simulator::simulate_day(sim_input, solver::toActionPlan(plan));
+                    if (candidate) {
+                        const auto candidate_score = simulator::official_score(previous_progress, candidate.value());
+                        const auto adopted_score = simulator::official_score(previous_progress,
+                            simulator::DaySimulationResult{last_record.simulation.end_agents,
+                                                           last_record.simulation.brands,
+                                                           last_record.simulation.total_balls});
+                        if (!simulator::better_official_score(candidate_score, adopted_score)) return;
+                    }
+                }
                 auto sent = competition.submit_plan(solver::toActionPlan(plan), config_.mode == RunMode::DryRun,
                                                     deadline.stop_at, std::nullopt);
                 if (!sent) {

@@ -42,15 +42,27 @@ export PROCON_TOKEN='<official-token>'
 
 練習場（procon37arena.online）では `practice.sh` が build・待機・Session の退避・`auto --execute` をまとめて行います。
 
+### 本番運用の方針
+
+本番当日の時系列手順、確認項目、異常時の判断は [docs/cheatsheet.md](docs/cheatsheet.md) を参照してください。標準・推奨構成は主 PC 単体での実行です。LAN worker は、事前に `worker-preflight` と実際の試合を最後まで安定して確認できた場合だけ使用します。
+
+LAN worker を使う場合は、主 PC と全 worker を clean worktree かつ同じ commit に揃えてください。build fingerprint は git commit 由来で未commit差分を識別しないため、dirty worktree のままでは worker 構成の同一性を検証できません。worker の詳細な OS 別設定、network、preflight 手順は [docs/lan-worker.md](docs/lan-worker.md) を参照してください。
+
+本番では、`--execute` がなければ POST されません。開始待ちの403が続く環境では `--max-get-retries 200` を推奨します。本番runごとに新しい session/log directory を使い、`waiting-for-match` は正常状態として停止しないでください。`RecoveryRequired` または POST 結果不明になった場合は、同じ session directory で自動再実行せず、公式状態と `show-state` を確認してから復旧手順を判断します。
+
+公式接続情報は主 PC だけに置き、token と worker secret を Git、チャット、コマンド履歴、スクリーンショットに残さないでください。worker は公式 token/API を使わず、worker 専用 secret で主 PC と通信します。
+
 ### 1 試合の流れ
 
 1. `GET /setting` を受け取ったら、solver が種別（どの車を補給車にするか）を決めて `POST /agent` します。
-   持ち時間は盤の大きさごとの締切（16×16 / 24×24 / 32×32 で 60 / 90 / 120 秒）までの残りから `--safety-seconds` を引いた分で、その 8 割で選びます（`--kind-ms` で上書きできます）。
+   開始前の予算の 50% を種別決めに使い、残りを day0 precompute に回します（`--kind-ms` で上書きできます）。実際の配分は実装で変わる可能性があるため、CLI ログの `budgetMs` で確認してください。
 2. 種別を出したら、締切（startsAt が分かればその時刻）まで別のスレッドで 1 日目を計画しておきます。1 日目の道路は全部空いていて、朝の状態も種別で決まるためです。1 日目はこの解から始めるので、1 日目の最初の提出から良い計画を出せます（回答時間が短くなる）。途中から入り直したときはしません。
 3. 毎日、まず全員が待つ計画を出します（計画ができるまでの保険）。
 4. solver が日の締切の `--safety-seconds`（既定 3 秒）前までの残り時間の 85% で計画し、系列・玉・翌日に効く項が良くなるたびに `--interim-ms`（既定 3000）ごとに出し直します。最後の計画が直前に出したものと同じなら出し直しません（回答時間で負けないため）。
-   1 日の計画は、乱数の種だけを変えた焼きなましを `--threads` 本同時に回し、一番良い解を使います（種によって行き着く解が少し違い、良い方を選ぶと玉が増えるため。1 日 3 秒の試験で 8 本は 1 本より 1 試合 +3.9 玉、32×32 で +9 玉）。
+   1 日の計画は、乱数の種だけを変えた焼きなましを `--threads` 本同時に回し、一番良い解を使います。`--threads` は日次solverだけでなく、種別決め中の候補のSA探索にも使われます。
 5. 提出する計画はすべて、提出の前に solver のシミュレーター（公式ルールの再現）で確かめます。
+
+内部のheuristic scoreと、公式順位用の `OfficialScore` は別物です。`OfficialScore` は「総系列数 → 日別系列数の合計 → 玉数」の辞書順で比較します。そのため、heuristicだけが小さく改善しても solver-interim は POST せず、strict simulatorで計算した `OfficialScore` が直近に受理された計画より辞書順で厳密に改善した場合だけ POST します。最終日は翌日の価値と、継続用の燃料・終点評価を使いません。種別決めでは通常道路と混雑道路の両条件を見て、翌日の道路状態も計画評価に反映します。
 
 ### 主な option
 
@@ -61,7 +73,9 @@ export PROCON_TOKEN='<official-token>'
 | `--kind-ms N` | 種別決めの持ち時間（既定: 締切から自動） |
 | `--interim-ms N` | 良くなった計画を出し直す間隔。0 なら最後の計画だけ |
 | `--safety-seconds N` | 日の締切の何秒前までに提出を終えるか（既定 3） |
-| `--threads N` | 1 日の計画を同時に回すスレッドの数（既定: 論理スレッド数の半分。全部使うと通信や OS の処理が遅れるため） |
+| `--threads N` | 日次solverと種別決め中の候補SA探索を同時に回すスレッドの数（既定: 論理スレッド数の半分。全部使うと通信や OS の処理が遅れるため） |
+| `--max-get-retries N` | `/setting` や日次状態のGET再試行回数（既定 8）。練習場など開始待ちで403が続く環境では 200 を推奨 |
+| `--lan-worker-timeout-ms N` | LAN worker の応答待ち上限。指定可能範囲などの詳細は [docs/lan-worker.md](docs/lan-worker.md) を参照 |
 | `--seed N` | LAN worker に渡す乱数の種のもと |
 | `--session-dir DIR` / `--log-dir DIR` | Session と OperationLog の置き場所（既定 `run/session`, `run/log`） |
 

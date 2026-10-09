@@ -8,6 +8,34 @@ struct Planner {
     int steps;
     bool lastDay;
     Router router;
+    Router heavyRouter;
+    static vector<int> predicted(const vector<int>& status) {
+        vector<int> out = status;
+        if (today == 0) {
+            for (int c = 0; c < NC; c++) if (cellType[c] == ROAD) out[c] = max(out[c], 1);
+            return out;
+        }
+        const bool hasYesterday = yesterdayDay == today - 1 && (int)yesterdayStatus.size() == NC;
+        for (int c = 0; c < NC; c++) {
+            if (cellType[c] != ROAD) continue;
+            int nb = 0;
+            for (int d = 0; d < 6; d++) {
+                int q = neighbor(c, d);
+                if (q >= 0 && cellType[q] == ROAD) nb = max(nb, status[q]);
+            }
+            const int s = status[c], y = hasYesterday ? yesterdayStatus[c] : 0;
+            if (today == 1) {
+                out[c] = s > 0 ? 2 : nb;
+            } else if (s == 0) {
+                out[c] = y == 2 ? (nb == 2 ? 2 : 1) : y == 1 ? (nb == 0 ? 0 : 1) : (nb == 2 ? 1 : 0);
+            } else if (s == 1) {
+                out[c] = y == 2 ? 2 : y == 1 ? 1 : (nb == 2 ? 2 : 1);
+            } else {
+                out[c] = y == 2 && nb <= 1 ? 1 : 2;
+            }
+        }
+        return out;
+    }
     vector<int> patrols, supplies;
     vector<vector<int>> brandSpots;
     vector<int> hubJump, hubCells;
@@ -23,7 +51,7 @@ struct Planner {
     bool verbose = true;
 
     Planner(const vector<Agent>& st_, const vector<int>& status, int steps_, bool last)
-        : st(st_), steps(steps_), lastDay(last), router(status), brandSpots(B) {
+        : st(st_), steps(steps_), lastDay(last), router(status), heavyRouter(predicted(status)), brandSpots(B) {
         for (int i = 0; i < NA; i++) (st[i].kind == 0 ? patrols : supplies).push_back(i);
         for (int s = 0; s < S; s++) brandSpots[spots[s].brand].push_back(s);
         for (int i : patrols) hubJump.push_back(st[i].pos);
@@ -43,16 +71,25 @@ struct Planner {
         next.setSchedule(sch);
         int missing;
         next.assignBrands(missing);
-        return tomorrowMemo[key] = missing;
+        Day heavy(end, daySteps[today + 1], today + 1, heavyRouter, patrols, supplies, brandSpots);
+        heavy.setSchedule(sch);
+        int heavyMissing;
+        heavy.assignBrands(heavyMissing);
+        return tomorrowMemo[key] = missing * 1000 + max(0, heavyMissing - missing);
     }
 
-    double total(const Day::Eval& e) { return e.score < -1e17 ? e.score : e.score - E_TOMORROW * tomorrowMisses(e.end); }
-    double lastingTotal(const Day::Eval& e) { return e.lasting < -1e17 ? e.lasting : e.lasting - E_TOMORROW * tomorrowMisses(e.end); }
+    double tomorrowPenalty(const vector<Agent>& end) {
+        const int misses = tomorrowMisses(end);
+        return E_TOMORROW * (misses / 1000) + E_TOMORROW_HEAVY * (misses % 1000);
+    }
+
+    double total(const Day::Eval& e) { return e.score < -1e17 ? e.score : e.score - tomorrowPenalty(e.end); }
+    double lastingTotal(const Day::Eval& e) { return e.lasting < -1e17 ? e.lasting : e.lasting - tomorrowPenalty(e.end); }
 
     // 動き終えた時刻の項を除いた評価が良くなったときだけ出し直すのは、今日の玉にも翌日にも効かない改善で出し直すと回答時間で負けるため
     void emit(const vector<vector<int>>& plan, double lasting) {
         lock_guard<mutex> g(emitted->lock);
-        if (lasting <= emitted->lasting || lasting < -1e17) return;
+        if (lasting < emitted->lasting + EMIT_MIN_GAIN || lasting < -1e17) return;
         emitInterim(plan);
         emitted->lasting = lasting;
         emitted->plan = plan;
@@ -273,12 +310,10 @@ struct Planner {
             }
         }
         if (best.score < -1e17) return allWait(steps);
-        if (!choosingKinds) {
-            emit(best.plan, best.lasting);
-            best = improve(best, timeMs - tm.ms());
-            result = best;
-            if (interimSec > 0 && emitted->lasting >= best.lasting) return emitted->plan;
-        }
+        if (!choosingKinds) emit(best.plan, best.lasting);
+        best = improve(best, timeMs - tm.ms());
+        result = best;
+        if (!choosingKinds && interimSec > 0 && emitted->lasting + EMIT_MIN_GAIN > best.lasting) return emitted->plan;
         return best.plan;
     }
 };
@@ -290,7 +325,7 @@ namespace {
 // スレッド 0 は 1 本で解くときと同じ種を使う
 pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, const vector<int>& status, int steps,
                                                       bool lastDay, double timeMs, const optional<Planner::Solution>& warm) {
-    int T = choosingKinds ? 1 : max(1, threads);
+    int T = max(1, threads);
     if (T == 1) {
         Planner p(st, status, steps, lastDay);
         p.warm = warm;
@@ -319,7 +354,7 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
     cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score << "\n";
     if (results[bestK].score < -1e17) return {results[bestK], plans[0]};
     // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
-    if (interimSec > 0 && emitted.lasting >= results[bestK].lasting) return {results[bestK], emitted.plan};
+    if (interimSec > 0 && emitted.lasting + EMIT_MIN_GAIN > results[bestK].lasting) return {results[bestK], emitted.plan};
     return {results[bestK], results[bestK].plan};
 }
 
@@ -349,7 +384,9 @@ vector<vector<int>> planDay(const vector<Agent>& st, const vector<int>& status, 
         day0Plan.reset();
     }
     if (warm) cerr << "[solver] 1 日目が始まる前に作った解から始める\n";
-    return solveDay(st, status, steps, lastDay, timeMs, warm).second;
+    auto plan = solveDay(st, status, steps, lastDay, timeMs, warm).second;
+    if (!choosingKinds) { yesterdayStatus = status; yesterdayDay = today; }
+    return plan;
 }
 
 void planDay0(const vector<int>& kinds, double timeMs) {

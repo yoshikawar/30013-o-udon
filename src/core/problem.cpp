@@ -18,6 +18,8 @@ int today;
 bool choosingKinds;
 double interimSec;
 int threads = 1;
+vector<int> yesterdayStatus;
+int yesterdayDay = -1;
 function<void(const vector<vector<int>>&)> interimSink;
 
 void emitInterim(const vector<vector<int>>& plan) {
