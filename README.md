@@ -105,7 +105,7 @@ LAN worker を使う場合は、主 PC と全 worker を clean worktree かつ�
 6. 日の提出（保険・出し直し・最後の計画）で、接続を切られた・空の応答・時間切れ・HTTP 5xx などで**送れたかどうか分からない**ときも、止めずに続けます（`warning=daily-post-outcome-unknown ... continuing`、保険なら `warning=safe-wait-outcome-unknown`）。日の提出はあとに出したものが有効になるので、次の出し直しか最後の計画で上書きされます（受け付けられた計画は前のままとして扱うので、最後に同じ計画をもう一度出します）。その日の `daily-end` に `unknownPosts=N` が付き、理由（curl のエラー）は `operations.jsonl` にも残ります。
    最後の提出が不明のまま日が終わったときは、どちらの計画が使われたか分からないため、手元で数えている系列・玉が少しずれることがあります（次の日の状態はサーバーから受け取るので、計画そのものは正しく続きます）。
 
-内部のheuristic scoreと、公式順位用の `OfficialScore` は別物です。`OfficialScore` は「総系列数 → 日別系列数の合計 → 玉数」の辞書順で比較します。そのため、heuristicだけが小さく改善しても solver-interim は POST せず、strict simulatorで計算した `OfficialScore` が直近に受理された計画より辞書順で厳密に改善した場合だけ POST します。最終日は翌日の価値と、継続用の燃料・終点評価を使いません。種別決めでは通常道路と混雑道路の両条件を見て、翌日の道路状態も計画評価に反映します。
+内部のheuristic scoreと、公式順位用の `OfficialScore` は別物です。`OfficialScore` は「総系列数 → 日別系列数の合計 → 玉数」の辞書順で比較します。そのため、heuristicだけが小さく改善しても solver-interim は POST せず、strict simulatorで計算した `OfficialScore` が直近に受理された計画より辞書順で厳密に改善した場合だけ POST します。最終日は翌日の価値と、継続用の燃料・終点評価を使いません。種別決めでは、2 日目以降の道路が順調な場合と全部混雑した場合（16×16・24×24 は全部渋滞した場合も）で各候補を回し、総系列と日別系列はいちばん悪い場合の値、玉は合計で比べます。翌日の道路状態も計画評価に反映します。
 
 ### 主な option
 

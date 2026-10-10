@@ -251,7 +251,7 @@ struct MatchScore {
     }
 };
 // 全チームが同じ動きをすると仮定（交通量 = 自チームの滞在数）して全日程を回す
-MatchScore simulateMatch(const vector<int>& kinds, double timeMs, bool busy = false);
+MatchScore simulateMatch(const vector<int>& kinds, double timeMs, int level = 0);  // level: 2 日目以降の道路の下限 0 順調 / 1 混雑 / 2 渋滞
 vector<int> solveKind(double timeMs);
 
 }  // namespace hexa_udon::solver

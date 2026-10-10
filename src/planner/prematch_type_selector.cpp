@@ -44,7 +44,7 @@ vector<vector<int>> kindCandidates() {
     return cands;
 }
 
-MatchScore simulateMatch(const vector<int>& kinds, double timeMs, bool busy) {
+MatchScore simulateMatch(const vector<int>& kinds, double timeMs, int level) {
     vector<Agent> st(NA);
     for (int i = 0; i < NA; i++) st[i] = {kinds[i], agentStart[i], FUEL_LIMIT};
     vector<char> collected(B, 0);
@@ -54,8 +54,8 @@ MatchScore simulateMatch(const vector<int>& kinds, double timeMs, bool busy) {
         vector<long long> sum(NC, 0);
         for (int k = max(0, d - 2); k < d; k++) for (int p = 0; p < NC; p++) sum[p] += stays[k][p];
         vector<int> status = statusFromStay(sum, 1);
-        if (busy && d > 0)
-            for (int c = 0; c < NC; c++) if (cellType[c] == ROAD) status[c] = max(status[c], 1);
+        if (level > 0 && d > 0)
+            for (int c = 0; c < NC; c++) if (cellType[c] == ROAD) status[c] = max(status[c], level);
         today = d;
         auto plan = planDay(st, status, collected, daySteps[d], d == D - 1, timeMs / D);
         DayResult r = simulateDay(st, plan, status, daySteps[d]);
@@ -77,10 +77,17 @@ vector<int> solveKind(double timeMs) {
     for (size_t c = 0; c < cands.size(); c++) {
         double remain = timeMs - tm.ms();
         if (c > 0 && remain <= 0) { cerr << "[kind] 時間切れ: 残り " << cands.size() - c << " 候補を省略\n"; break; }
-        const double each = max(1.0, remain / (cands.size() - c)) / 2;
-        MatchScore smooth = simulateMatch(cands[c], each), heavy = simulateMatch(cands[c], each, true);
-        MatchScore ms{min(smooth.matchBrands, heavy.matchBrands), min(smooth.dayBrands, heavy.dayBrands),
-                      smooth.balls + heavy.balls};
+        // 道路が順調な場合と、2 日目以降が全部混雑した場合で比べる。16x16・24x24 は全部渋滞した場合も比べる
+        // （渋滞しやすい盤で補給車の選び方を外さないため。32x32 は 1 日あたりの時間が短くなりすぎるので 2 通り）
+        const vector<int> levels = W <= 24 ? vector<int>{0, 1, 2} : vector<int>{0, 1};
+        const double each = max(1.0, remain / (cands.size() - c)) / levels.size();
+        MatchScore ms{INT_MAX, INT_MAX, 0};
+        for (int level : levels) {
+            const MatchScore s = simulateMatch(cands[c], each, level);
+            ms.matchBrands = min(ms.matchBrands, s.matchBrands);
+            ms.dayBrands = min(ms.dayBrands, s.dayBrands);
+            ms.balls += s.balls;
+        }
         cerr << "[kind] cand=" << c << " (";
         for (int k : cands[c]) cerr << k;
         cerr << ") brands=" << ms.matchBrands << " dayBrands=" << ms.dayBrands << " balls=" << ms.balls << "\n";
