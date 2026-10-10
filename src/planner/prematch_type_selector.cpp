@@ -73,7 +73,7 @@ vector<int> solveKind(double timeMs) {
     choosingKinds = true;
     auto cands = kindCandidates();
     Timer tm;
-    MatchScore best; vector<int> bestK = cands[0];
+    vector<pair<MatchScore, vector<int>>> scored;
     for (size_t c = 0; c < cands.size(); c++) {
         double remain = timeMs - tm.ms();
         if (c > 0 && remain <= 0) { cerr << "[kind] 時間切れ: 残り " << cands.size() - c << " 候補を省略\n"; break; }
@@ -84,9 +84,21 @@ vector<int> solveKind(double timeMs) {
         cerr << "[kind] cand=" << c << " (";
         for (int k : cands[c]) cerr << k;
         cerr << ") brands=" << ms.matchBrands << " dayBrands=" << ms.dayBrands << " balls=" << ms.balls << "\n";
-        if (c == 0 || best < ms) { best = ms; bestK = cands[c]; }
+        scored.push_back({ms, cands[c]});
     }
-    return bestK;
+    // 総系列が一番多い候補のうち、日別系列が最大から 1 以内のものは同点とみなし、玉で選ぶ。
+    // 日別系列の見込みは種別決めの中の短い計画で出すので ±1 は揺れる。その差で補給車を増やすと、
+    // 巡回車が減った分だけ玉を損するため（練習場の 32x32 で、補給車 2 台を選んで玉が 4% 少なかった）
+    int topBrands = INT_MIN, topDay = INT_MIN;
+    for (auto& [ms, k] : scored) topBrands = max(topBrands, ms.matchBrands);
+    for (auto& [ms, k] : scored) if (ms.matchBrands == topBrands) topDay = max(topDay, ms.dayBrands);
+    const pair<MatchScore, vector<int>>* pick = nullptr;
+    for (auto& s : scored) {
+        const MatchScore& ms = s.first;
+        if (ms.matchBrands != topBrands || ms.dayBrands < topDay - KIND_DAY_TOLERANCE) continue;
+        if (!pick || tie(ms.balls, ms.dayBrands) > tie(pick->first.balls, pick->first.dayBrands)) pick = &s;
+    }
+    return pick ? pick->second : cands[0];
 }
 
 }  // namespace hexa_udon::solver
