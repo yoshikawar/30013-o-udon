@@ -437,13 +437,14 @@ protocol::Result<core::DailyState> AutoCompetitionClient::fetch_state(
 }
 
 bool AutoCompetitionClient::has_unknown_submission(const session::SessionSnapshot& snapshot) const {
-    return snapshot.agent_kinds_unknown ||
-           std::any_of(snapshot.submissions.begin(), snapshot.submissions.end(), [](const auto& item) {
-        // Recovery is keyed to the persisted tri-state outcome, not to a
-        // legacy classification name. A null value means POST started but its
-        // outcome is not safely known.
-        return !item.submission_attempted.has_value();
-           });
+    // 止めるのは種別の結果が分からないときだけ。日の提出は、あとに出したものが有効になるので
+    // 結果の分からない提出（submissionAttempted が null）があっても、次の提出で上書きして続ける
+    return snapshot.agent_kinds_unknown;
+}
+
+static std::size_t unknown_action_posts(const session::SessionSnapshot& snapshot) {
+    return static_cast<std::size_t>(std::count_if(snapshot.submissions.begin(), snapshot.submissions.end(),
+        [](const auto& item) { return !item.submission_attempted.has_value(); }));
 }
 
 void AutoCompetitionClient::print_kinds(const std::vector<core::AgentKind>& kinds) {
@@ -485,8 +486,10 @@ void AutoCompetitionClient::print_day_summary(
             << official_score.total_bowls << "]"
             << " candidateSource=" << candidate_source
             << " adoption=" << adoption
-            << " post=" << (record.revision ? "success" : "dry-run")
-            << " agents=\"";
+            << " post=" << (record.revision ? "success" : config_.mode == RunMode::DryRun ? "dry-run" : "none");
+    if (planning_record.is_object() && planning_record.value("unknownPosts", std::size_t{0}) > 0)
+        output_ << " unknownPosts=" << planning_record.value("unknownPosts", std::size_t{0});
+    output_ << " agents=\"";
     for (std::size_t index = 0; index < record.simulation.end_agents.size(); ++index) {
         if (index != 0) output_ << ';';
         const auto& agent = record.simulation.end_agents[index];
@@ -577,6 +580,8 @@ RunResult AutoCompetitionClient::run() {
             logger_->write(recovery_log);
             return {RunStatus::RecoveryRequired, "saved session contains an unknown POST outcome"};
         }
+        if (const auto unknown = unknown_action_posts(initial.snapshot()); unknown > 0)
+            output_ << "warning=restored-unknown-daily-posts count=" << unknown << " continuing\n";
     }
     // 種別の締切。設定を受け取った時刻から数え、startsAt（1 日目が始まる時刻）の方が早ければそこまで
     auto kind_deadline = setting_received_at + std::chrono::seconds{kind_deadline_seconds(setting.value().map.width())};
@@ -813,23 +818,30 @@ RunResult AutoCompetitionClient::run() {
                 submitted = competition.submit_safe_wait(false, deadline.stop_at);
                 submit_backoff = std::min(submit_backoff * 2, std::chrono::milliseconds{2000});
             }
-            if (!submitted) {
+            // 受け付けられた最後の提出。保険が通らなかったときは、何も受け付けられていない（全員がその場にいる）とみなす
+            session::SubmissionRecord last_record;
+            last_record.simulation.end_agents = daily.value().own_agents;
+            std::size_t unknown_posts = 0;  // この日に送れたか分からなかった提出の数
+            if (submitted) {
+                last_record = submitted.value();
+            } else {
                 log_daily_failure(daily.value().day, "simulation_or_transport_failure",
                                   submitted.error().message, submitted.error().submission_attempted,
                                   "daily-submit");
-                if (config_.mode == RunMode::Execute) {
-                    const auto saved_failure = competition.save(state_path);
-                    if (!saved_failure) return {RunStatus::Failed, saved_failure.error().message};
+                // 保険が通らなくても止めずに solver の計画を出しに行く。日の提出は、あとに出したものが有効になる
+                const bool unknown = !submitted.error().submission_attempted.has_value();
+                if (unknown) {
+                    ++unknown_posts;
+                    static_cast<void>(competition.continue_after_unknown_action_post());
                 }
-                return {!submitted.error().submission_attempted.has_value()
-                            ? RunStatus::RecoveryRequired : RunStatus::Failed,
-                        submitted.error().message};
+                output_ << "warning=safe-wait-" << (unknown ? "outcome-unknown" : "not-accepted")
+                        << " day=" << daily.value().day << " reason=\"" << submitted.error().message
+                        << "\" continuing\n";
             }
             if (config_.mode == RunMode::Execute) {
                 auto saved = competition.save(state_path);
                 if (!saved) return {RunStatus::Failed, saved.error().message};
             }
-            session::SubmissionRecord last_record = submitted.value();
 
             const auto& day_state = daily.value();
             const auto steps = setting.value().day_steps.at(static_cast<std::size_t>(day_state.day));
@@ -837,10 +849,9 @@ RunResult AutoCompetitionClient::run() {
                 setting.value().fuel_limit, steps, day_state.own_agents, day_state.traffic};
             std::vector<std::vector<int>> adopted = solver::allWait(steps);
             std::string adopted_source = "wait";
-            std::optional<RunResult> submit_failure;
-            // 計画が変わったときだけ出し直す。失敗したらその日はもう出さない
+            // 計画が変わったときだけ出し直す
             const auto submit = [&](const std::vector<std::vector<int>>& plan, const std::string& source) {
-                if (submit_failure || plan == adopted || clock_.now() >= deadline.stop_at) return;
+                if (plan == adopted || clock_.now() >= deadline.stop_at) return;
                 if (source == "solver-interim") {
                     const auto candidate = simulator::simulate_day(sim_input, solver::toActionPlan(plan));
                     if (candidate) {
@@ -857,9 +868,17 @@ RunResult AutoCompetitionClient::run() {
                 if (!sent) {
                     log_daily_failure(day_state.day, "transport-or-deadline", sent.error().message,
                                       sent.error().submission_attempted, "daily-submit");
-                    // 送ったかどうか分からないときは止めて人が確かめる。分かっている失敗なら前の提出が残る
-                    if (!sent.error().submission_attempted.has_value())
-                        submit_failure = RunResult{RunStatus::RecoveryRequired, sent.error().message};
+                    // 分かっている失敗なら前の提出が残る。送れたか分からないときも止めずに続け、次の提出で上書きする
+                    // （adopted は前のままなので、同じ計画が最後にもう一度出される）
+                    const bool unknown = !sent.error().submission_attempted.has_value();
+                    if (unknown) {
+                        ++unknown_posts;
+                        static_cast<void>(competition.continue_after_unknown_action_post());
+                        if (config_.mode == RunMode::Execute) static_cast<void>(competition.save(state_path));
+                    }
+                    output_ << "warning=daily-post-" << (unknown ? "outcome-unknown" : "not-accepted")
+                            << " day=" << day_state.day << " source=" << source
+                            << " reason=\"" << sent.error().message << "\" continuing\n";
                     return;
                 }
                 adopted = plan;
@@ -991,15 +1010,12 @@ RunResult AutoCompetitionClient::run() {
                 worker_observations[best_worker->worker_index]["adoption"] = "worker";
             }
             if (local || final_source == "worker") submit(final_plan, final_source);
-            if (submit_failure) {
-                if (config_.mode == RunMode::Execute) static_cast<void>(competition.save(state_path));
-                return *submit_failure;
-            }
             const auto& adopted_simulation = last_record.simulation;
             nlohmann::json record = {{"day", day_state.day}, {"planner", "solver"},
                 {"candidateSource", adopted_source}, {"adoptionReason", adopted_source},
                 {"predictedBalls", adopted_simulation.total_balls},
                 {"predictedBrands", adopted_simulation.brands},
+                {"unknownPosts", unknown_posts},
                 {"workerObservations", worker_observations}};
             const auto day_score = simulator::official_score(previous_progress,
                 {adopted_simulation.end_agents, {adopted_simulation.brands.begin(), adopted_simulation.brands.end()},

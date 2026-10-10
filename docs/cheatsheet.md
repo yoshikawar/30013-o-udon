@@ -184,7 +184,8 @@ set -o pipefail
 | `candidateSource=wait` | safe-waitが残った。試合は継続するが終了後に要調査 |
 | `warning=lan-worker ...` | worker障害。主PCは継続し、終了後にworkerログを確認 |
 | `polling-limit` | GET再試行上限。通常は `--max-get-retries 200` を確認 |
-| `RecoveryRequired` / unknown POST outcome | 同じsessionで再実行しない。状態確認へ進む |
+| `warning=daily-post-outcome-unknown` / `warning=safe-wait-outcome-unknown` | 日の提出が送れたか不明。止めずに次の提出で上書きするので、そのまま待つ。終了後に `operations.jsonl` で原因を確認 |
+| `RecoveryRequired` | 種別の POST が不明など。同じsessionで再実行しない。状態確認へ進む |
 | `result=Success` | 完走 |
 
 公式順位用OfficialScoreは「総系列数 → 日別系列数合計 → 玉数」の順で比較される。回答時間を短縮するため、試合中にプロセス停止・手動提出をしない。
@@ -194,7 +195,8 @@ set -o pipefail
 - worker preflight失敗: そのworkerを外して主PC単体へ切り替える。
 - `warning=lan-worker`: autoを止めない。終了後に原因を調べる。
 - token missing: auto開始前ならtokenを設定してから実行する。
-- `RecoveryRequired` またはPOST結果不明: 自動再送や同じsession directoryでの再実行をしない。`show-state` と公式状態を確認し、必要なら `recover` をdry-runで確認する。
+- 日の提出の結果不明（`warning=...-outcome-unknown`）: autoは止まらずに続く。止めない。
+- `RecoveryRequired`: 自動再送や同じsession directoryでの再実行をしない。`show-state` と公式状態を確認し、必要なら `recover` をdry-runで確認する。
 - `polling-limit`: `--max-get-retries 200` の指定を確認する。ただし本番中に無計画な設定変更・再起動をしない。
 - `result=Failed`: session/logを保全し、原因を確認してから次の判断をする。
 

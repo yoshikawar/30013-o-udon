@@ -95,23 +95,12 @@ prepare_session_for_match() {
 
   [[ "$saved_match_id" == "$current_match_id" ]] && return 0
 
-  # The current writer always writes submissionAttempted.  Older session files
-  # did not, so an Accepted record is considered known only when its HTTP
-  # response and revision prove that the server accepted it.
-  if ! jq -e '
-    (.agentKindsUnknown == true) or
-    any(.submissions[]?;
-      (.classification == 5) or
-      ((.submissionAttempted == null) and
-       (has("submissionAttempted") or
-        .classification != 0 or .httpStatus != 200 or .revision == null)))
-  ' "$state" >/dev/null; then
-    archive_previous_session
-    return $?
+  # 別の試合の Session は、結果の分からない提出が残っていても退避する（消さずに残すので後から調べられる）
+  if jq -e '(.agentKindsUnknown == true) or any(.submissions[]?; .submissionAttempted == null)' \
+      "$state" >/dev/null; then
+    echo "Previous match state has an unknown POST outcome (kept in the archive)." >&2
   fi
-
-  echo "Previous match state has an unknown POST outcome; keeping run/session for manual inspection." >&2
-  return 1
+  archive_previous_session
 }
 
 echo "Waiting for the match setting (up to $WAIT_SECONDS seconds)..."

@@ -195,6 +195,9 @@ public:
         const simulator::DayActionPlan& plan, bool dry_run,
         std::optional<protocol::SteadyTime> deadline = std::nullopt,
         std::optional<PlannerSubmissionMetadata> planner = std::nullopt);
+    // 日の提出の結果が分からなかったあとも提出を続ける（日の提出は、あとに出したものが有効になるため）。
+    // 種別の結果が分からないときは続けない
+    [[nodiscard]] bool continue_after_unknown_action_post();
     [[nodiscard]] protocol::Result<bool> save(const std::filesystem::path& path) const;
     [[nodiscard]] protocol::Result<bool> restore(const std::filesystem::path& path);
 
