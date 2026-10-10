@@ -77,8 +77,8 @@ while :; do
     --max-time 10 \
     -o run/setting-response.json \
     -w '%{http_code}' \
-    -H "Procon-Token: ${PROCON_TOKEN}" \
-    "https://procon37arena.online/setting")
+    -G --data-urlencode "token=${PROCON_TOKEN}" \
+    "http://172.28.0.10:8080/setting")
   curl_status=$?
 
   if [[ $curl_status -ne 0 ]]; then
@@ -109,7 +109,7 @@ prepare_session_for_match || exit $?
 
 run_client() {
   ./build/hexa_udon auto \
-    --base-url "https://procon37arena.online" \
+    --base-url "http://172.28.0.10:8080" \
     --token-env PROCON_TOKEN \
     --max-get-retries 200 \
     --execute \
