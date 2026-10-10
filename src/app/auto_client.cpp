@@ -852,7 +852,12 @@ RunResult AutoCompetitionClient::run() {
             // 計画が変わったときだけ出し直す
             const auto submit = [&](const std::vector<std::vector<int>>& plan, const std::string& source) {
                 if (plan == adopted || clock_.now() >= deadline.stop_at) return;
-                if (source == "solver-interim") {
+                // 最後の計画は、16x16 と最終日では公式の点が良くなるときだけ出す。同じ点で出し直すと回答時間で負けるため
+                // （練習場で上位が同点に並び、回答時間で順位を落とした）。24x24・32x32 の途中の日は、翌日向けの位置取りで
+                // 玉が 1% ほど増えるので今までどおり出す
+                const bool strict_final = source != "solver-interim" &&
+                    (setting.value().map.width() <= 16 || day_state.day == total_days - 1);
+                if (source == "solver-interim" || strict_final) {
                     const auto candidate = simulator::simulate_day(sim_input, solver::toActionPlan(plan));
                     if (candidate) {
                         const auto candidate_score = simulator::official_score(previous_progress, candidate.value());
