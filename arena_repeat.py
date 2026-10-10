@@ -29,7 +29,7 @@ def notify_failure(match, departure, result):
         raise ValueError("Invalid Discord webhook configuration")
     payload = {
         "content": (
-            "@everyone\n\n定期参加が異常終了し、安全のため停止しました。\n"
+            "定期参加が異常終了し、安全のため停止しました。\n"
             f"出発時刻: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(departure))}\n"
             f"終了コード: {result}\n"
             "STOPPEDを確認し、公式状態とローカルのSession/ログを照合してください。"
