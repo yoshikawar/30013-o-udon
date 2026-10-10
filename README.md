@@ -42,6 +42,18 @@ export PROCON_TOKEN='<official-token>'
 
 練習場（procon37arena.online）では `practice.sh` が build・待機・Session の退避・`auto --execute` をまとめて行います。
 
+### 2.1 非公式鯖への自動実行
+指定アリーナに定期参加する場合は、ビルド後に `python3 -u arena_repeat.py` を実行します。
+公開スケジュールを60秒ごとに確認し、各試合の受付開始後に `auto --execute` を1回起動します。
+Sessionとログは `run/arena-repeat/<出発時刻>/` に保存します。二重起動はロックで防止します。
+クライアントが異常終了すると `run/arena-repeat/STOPPED` を残して停止するため、状態確認なしに再送しません。その際はDiscordに `@everyone` 付きで異常終了を1回通知します。
+停止は `kill "$(cat run/arena-repeat/scheduler.pid)"`。PCの起動中に動作し、再起動後は再度起動が必要です。
+
+Discord結果通知は `python3 -u arena_notify.py` で別プロセスとして起動します。
+Webhook URLはGit管理外の `run/arena-repeat/discord-webhook.secret`（権限0600）に保存します。
+複数卓の場合は同じ回の各卓を通知します。通知済みの試合は `.sent` ファイルで記録します。
+停止は `kill "$(cat run/arena-repeat/notifier.pid)"`。再起動後は通知プロセスも再起動してください。
+
 ### 本番運用の方針
 
 本番当日の時系列手順、確認項目、異常時の判断は [docs/cheatsheet.md](docs/cheatsheet.md) を参照してください。標準・推奨構成は主 PC 単体での実行です。LAN worker は、事前に `worker-preflight` と実際の試合を最後まで安定して確認できた場合だけ使用します。
