@@ -86,16 +86,23 @@ vector<int> solveKind(double timeMs) {
         cerr << ") brands=" << ms.matchBrands << " dayBrands=" << ms.dayBrands << " balls=" << ms.balls << "\n";
         scored.push_back({ms, cands[c]});
     }
-    // 総系列が一番多い候補のうち、日別系列が最大から 1 以内のものは同点とみなし、玉で選ぶ。
-    // 日別系列の見込みは種別決めの中の短い計画で出すので ±1 は揺れる。その差で補給車を増やすと、
-    // 巡回車が減った分だけ玉を損するため（練習場の 32x32 で、補給車 2 台を選んで玉が 4% 少なかった）
+    // 総系列が一番多い候補のうち、日別系列の見込みが最大から許容（最大の KIND_DAY_TOLERANCE、最低 1）以内のものに絞り、
+    // その中で補給車が一番少ない台数の候補から、玉が一番多いものを選ぶ。
+    // 種別決めの中の計画は短い（32x32 で 1 日 0.3 秒ほど）ので、補給車が多い案ほど日別系列が高めに出る。
+    // 練習場の 32x32 で、補給車 2 台の見込みが 198、1 台が 194〜196 だったが、対戦させると 1 台でも満点を取り、
+    // 玉は 2 台より 6% 多かった
     int topBrands = INT_MIN, topDay = INT_MIN;
     for (auto& [ms, k] : scored) topBrands = max(topBrands, ms.matchBrands);
     for (auto& [ms, k] : scored) if (ms.matchBrands == topBrands) topDay = max(topDay, ms.dayBrands);
+    const int tolerance = max(1, (int)lround(topDay * KIND_DAY_TOLERANCE));
+    const auto supplies = [](const vector<int>& k) { return (int)count(k.begin(), k.end(), 1); };
+    int fewest = INT_MAX;
+    for (auto& [ms, k] : scored)
+        if (ms.matchBrands == topBrands && ms.dayBrands >= topDay - tolerance) fewest = min(fewest, supplies(k));
     const pair<MatchScore, vector<int>>* pick = nullptr;
     for (auto& s : scored) {
         const MatchScore& ms = s.first;
-        if (ms.matchBrands != topBrands || ms.dayBrands < topDay - KIND_DAY_TOLERANCE) continue;
+        if (ms.matchBrands != topBrands || ms.dayBrands < topDay - tolerance || supplies(s.second) != fewest) continue;
         if (!pick || tie(ms.balls, ms.dayBrands) > tie(pick->first.balls, pick->first.dayBrands)) pick = &s;
     }
     return pick ? pick->second : cands[0];
