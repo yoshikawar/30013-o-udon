@@ -11,12 +11,67 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <ctime>
 #include <optional>
 #include <set>
 #include <string>
 #include <thread>
 
 namespace {
+
+// 画面に出す内容（標準出力・標準エラー）を、そのまま log directory のファイルにも書く。
+// solver のスレッドと同時に書くことがあるので、書き込みは 1 つの mutex で順番にする
+class TeeBuffer : public std::streambuf {
+public:
+    TeeBuffer(std::streambuf* screen, std::streambuf* file, std::mutex& lock)
+        : screen_(screen), file_(file), lock_(lock) {}
+
+protected:
+    int overflow(int c) override {
+        if (traits_type::eq_int_type(c, traits_type::eof())) return traits_type::not_eof(c);
+        std::lock_guard guard(lock_);
+        screen_->sputc(traits_type::to_char_type(c));
+        file_->sputc(traits_type::to_char_type(c));
+        return c;
+    }
+    std::streamsize xsputn(const char* text, std::streamsize count) override {
+        std::lock_guard guard(lock_);
+        screen_->sputn(text, count);
+        file_->sputn(text, count);
+        return count;
+    }
+    int sync() override {
+        std::lock_guard guard(lock_);
+        screen_->pubsync();
+        file_->pubsync();
+        return 0;
+    }
+
+private:
+    std::streambuf* screen_;
+    std::streambuf* file_;
+    std::mutex& lock_;
+};
+
+// 終わるときに標準出力・標準エラーを元に戻す
+struct StreamRestorer {
+    std::streambuf* out;
+    std::streambuf* err;
+    ~StreamRestorer() {
+        std::cout.rdbuf(out);
+        std::cerr.rdbuf(err);
+    }
+};
+
+std::string local_timestamp() {
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+    localtime_r(&now, &local);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+    return stamp;
+}
 
 const char* safe_error_classification(hexa_udon::protocol::ErrorCode code) noexcept {
     using ErrorCode = hexa_udon::protocol::ErrorCode;
@@ -282,6 +337,22 @@ int main(int argc, char** argv) {
         : options->log_level == "warning" ? protocol::OperationLogEntry::Level::Warning
                                             : protocol::OperationLogEntry::Level::Info;
     protocol::FileOperationLogger logger(options->log_directory / "operations.jsonl", log_level);
+    // 画面の出力を log directory の client-output-<時刻>.log にも残す（tee を付けなくても残る）
+    const auto client_log_path = options->log_directory / ("client-output-" + local_timestamp() + ".log");
+    std::ofstream client_log(client_log_path);
+    std::filesystem::permissions(client_log_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, error);
+    std::mutex client_log_lock;
+    TeeBuffer out_tee(std::cout.rdbuf(), client_log.rdbuf(), client_log_lock);
+    TeeBuffer err_tee(std::cerr.rdbuf(), client_log.rdbuf(), client_log_lock);
+    StreamRestorer restore_streams{std::cout.rdbuf(), std::cerr.rdbuf()};
+    if (client_log) {
+        std::cout.rdbuf(&out_tee);
+        std::cerr.rdbuf(&err_tee);
+        std::cout << "client-log=" << client_log_path.string() << '\n';
+    } else {
+        std::cerr << "warning=client-log cannot open " << client_log_path.string() << '\n';
+    }
     protocol::CurlHttpTransport transport;
     protocol::ApiConfig api_config{options->base_url, token};
     api_config.connect_timeout = std::chrono::milliseconds{options->connect_timeout_ms};

@@ -583,7 +583,8 @@ simulator::MatchProgress SessionController::progress() const { return progress_;
 
 protocol::Result<bool> SessionController::save(const std::filesystem::path& path) const {
     Json root{{"schemaVersion", SessionSnapshot::schema_version},
-              {"matchId", snapshot_.match_id}};
+              {"matchId", snapshot_.match_id},
+              {"startsAt", config_.starts_at}};
     if (snapshot_.last_observed_day) {
         root["lastObservedDay"] = *snapshot_.last_observed_day;
     } else {
@@ -686,7 +687,10 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
             return protocol::Result<bool>::failure(
                 {protocol::ErrorCode::VersionMismatch, "unsupported state schema version"});
         }
-        if (root.at("matchId").get<std::string>() != match_id()) {
+        // 盤と初期位置が同じでも、開始時刻（startsAt）が違えば別の試合。どちらかが 0（開始時刻が未定）なら比べない
+        const auto stored_starts_at = root.value("startsAt", core::UnixTimestamp{0});
+        if (root.at("matchId").get<std::string>() != match_id()
+            || (stored_starts_at != 0 && config_.starts_at != 0 && stored_starts_at != config_.starts_at)) {
             state_ = SessionState::RecoveryRequired;
             return protocol::Result<bool>::failure(
                 {protocol::ErrorCode::Conflict, "persisted state belongs to another match"});

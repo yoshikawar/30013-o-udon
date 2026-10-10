@@ -13,3 +13,5 @@ __pycache__/
 .DS_Store
 .cache/
 run/
+# token を書く設定ファイル（.env.example は入れる）
+.env

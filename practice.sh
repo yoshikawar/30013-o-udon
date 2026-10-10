@@ -1,12 +1,59 @@
 #!/usr/bin/env bash
+# 試合に 1 回出る。build → /setting を待つ → 前の試合の Session を退避 → hexa_udon auto --execute
+#
+#   ./practice.sh                     公式の試合（既定 http://172.28.0.10:8080、VENUE_BASE_URL で変えられる）
+#                                     token は PROCON_TOKEN
+#   ./practice.sh --arena             練習場（https://procon37arena.online）
+#                                     token は PROCON_ARENA_TOKEN（公式の token を外へ送らないため別にする）
+#   ./practice.sh --base-url URL      ほかのサーバー（token は PROCON_TOKEN）
+#   ./practice.sh --wait 600          /setting を待つ秒数（既定 180）
+#   ほかの引数はそのまま hexa_udon auto に渡す（例: ./practice.sh --threads 8）
+#   token などは .env に書いておける（.env.example を .env にコピーして書き換える。.env は Git に入らない）
 
 set -o pipefail
+cd "$(dirname "$0")" || exit 1
 mkdir -p run
 
-if [[ -z ${PROCON_TOKEN:-} ]]; then
-  echo "PROCON_TOKEN is not set." >&2
+# .env（このスクリプトと同じフォルダー）から KEY=値 の行を読む。すでに設定されている環境変数はそのまま。
+# シェルとしては実行しない（source しない）ので、値に書いたコマンドは実行されない
+load_env_file() {
+  local file=$1 line key value
+  [[ -f $file ]] || return 0
+  if [[ $(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file") != 600 ]]; then
+    echo "warning: $file can be read by other users (chmod 600 $file)" >&2
+  fi
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    key=${BASH_REMATCH[2]}
+    value=${BASH_REMATCH[3]}
+    if [[ $value =~ ^\"(.*)\"$ || $value =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
+    [[ -n ${!key+x} ]] || export "$key=$value"
+  done < "$file"
+}
+load_env_file .env
+
+BASE_URL="${VENUE_BASE_URL:-http://172.28.0.10:8080}"
+TOKEN_ENV=PROCON_TOKEN
+WAIT_SECONDS=180
+extra_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --arena) BASE_URL="https://procon37arena.online"; TOKEN_ENV=PROCON_ARENA_TOKEN; shift ;;
+    --base-url) BASE_URL="${2:?--base-url needs a URL}"; shift 2 ;;
+    --wait) WAIT_SECONDS="${2:?--wait needs seconds}"; shift 2 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) extra_args+=("$1"); shift ;;
+  esac
+done
+BASE_URL="${BASE_URL%/}"
+
+if [[ -z ${!TOKEN_ENV:-} ]]; then
+  echo "$TOKEN_ENV is not set." >&2
   exit 1
 fi
+TOKEN="${!TOKEN_ENV}"
+echo "Target: $BASE_URL (token from $TOKEN_ENV)"
 
 echo "Configuring and building Release client..."
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release || exit $?
@@ -67,9 +114,8 @@ prepare_session_for_match() {
   return 1
 }
 
-# you can custom waiting time(limited 180)
-echo "Waiting for the match setting (up to 180 seconds)..."
-setting_deadline=$((SECONDS + 180))
+echo "Waiting for the match setting (up to $WAIT_SECONDS seconds)..."
+setting_deadline=$((SECONDS + WAIT_SECONDS))
 while :; do
   : > run/setting-response.json
   http_status=$(curl -sS \
@@ -77,8 +123,8 @@ while :; do
     --max-time 10 \
     -o run/setting-response.json \
     -w '%{http_code}' \
-    -G --data-urlencode "token=${PROCON_TOKEN}" \
-    "http://172.28.0.10:8080/setting")
+    -G --data-urlencode "token=${TOKEN}" \
+    "${BASE_URL}/setting")
   curl_status=$?
 
   if [[ $curl_status -ne 0 ]]; then
@@ -87,7 +133,7 @@ while :; do
     echo "Match setting is available; starting client."
     break
   elif [[ $http_status == 401 ]]; then
-    echo "Authentication failed. Check PROCON_TOKEN." >&2
+    echo "Authentication failed. Check $TOKEN_ENV." >&2
     exit 1
   elif [[ $http_status != 403 ]]; then
     echo "Unexpected /setting response: HTTP $http_status" >&2
@@ -109,10 +155,11 @@ prepare_session_for_match || exit $?
 
 run_client() {
   ./build/hexa_udon auto \
-    --base-url "http://172.28.0.10:8080" \
-    --token-env PROCON_TOKEN \
+    --base-url "$BASE_URL" \
+    --token-env "$TOKEN_ENV" \
     --max-get-retries 200 \
     --execute \
+    "${extra_args[@]}" \
     2>&1 | tee run/client-output.log
 }
 
