@@ -15,6 +15,30 @@ std::string join_url(std::string base, const std::string& path) {
     return base + (path.empty() || path.front() == '/' ? path : "/" + path);
 }
 
+// URL のクエリに入れられるように、英数字と -._~ 以外を %XX にする
+std::string url_encode(const std::string& value) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (const unsigned char c : value) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+            || c == '-' || c == '.' || c == '_' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+// token は ?token= で渡す（競技サーバーの /setting?token=... の形）
+std::string with_token(std::string url, const std::string& token) {
+    if (token.empty()) return url;
+    url += url.find('?') == std::string::npos ? '?' : '&';
+    return url + "token=" + url_encode(token);
+}
+
 std::optional<std::int64_t> retry_after_milliseconds(const HttpResponse& response) {
     for (const auto& [name, value] : response.headers) {
         if (name != "retry-after") continue;
@@ -74,10 +98,12 @@ ProconApiClient::ProconApiClient(HttpTransport& transport, ApiConfig config,
       logger_(logger == nullptr ? &null_logger_ : logger) {}
 
 Error ProconApiClient::redact(Error error) const {
-    if (!config_.token.empty()) {
+    // token は URL に入るので、%XX にした形も伏せる
+    for (const auto& secret : {config_.token, url_encode(config_.token)}) {
+        if (secret.empty()) continue;
         std::size_t offset = 0;
-        while ((offset = error.message.find(config_.token, offset)) != std::string::npos) {
-            error.message.replace(offset, config_.token.size(), "[REDACTED]");
+        while ((offset = error.message.find(secret, offset)) != std::string::npos) {
+            error.message.replace(offset, secret.size(), "[REDACTED]");
             offset += std::string_view{"[REDACTED]"}.size();
         }
     }
@@ -145,8 +171,8 @@ Result<HttpResponse> ProconApiClient::request(
     }
     HttpRequest request{
         method,
-        join_url(config_.base_url, path),
-        {"Accept: application/json", "Procon-Token: " + config_.token},
+        with_token(join_url(config_.base_url, path), config_.token),
+        {"Accept: application/json"},
         body,
         config_.connect_timeout,
         config_.total_timeout,
