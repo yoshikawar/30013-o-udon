@@ -210,6 +210,8 @@ Result<HttpResponse> ProconApiClient::request(
     } else {
         entry.level = OperationLogEntry::Level::Error;
         entry.response_classification = "transport-error";
+        // curl のエラー（接続を切られた・空の応答など）を残す。後で原因を調べるため
+        entry.stop_reason = redact(response.error()).message;
     }
     if (method == HttpMethod::Post) {
         entry.submission_attempted = response
@@ -300,7 +302,7 @@ Result<bool> ProconApiClient::post_agent_kinds(
         error.submission_attempted = failed_post_outcome(error);
         if (!error.submission_attempted.has_value())
             return Result<bool>::failure(
-                {ErrorCode::UnknownResponse, "POST /agent outcome is unknown"});
+                {ErrorCode::UnknownResponse, "POST /agent outcome is unknown: " + error.message});
         return Result<bool>::failure(std::move(error));
     }
     if (response.value().status != 200) {
@@ -344,7 +346,8 @@ Result<std::int32_t> ProconApiClient::post_actions(
         error.submission_attempted = failed_post_outcome(error);
         if (!error.submission_attempted.has_value()) {
             return Result<std::int32_t>::failure(
-                {ErrorCode::UnknownResponse, "POST outcome is unknown", std::nullopt, std::nullopt});
+                {ErrorCode::UnknownResponse, "POST outcome is unknown: " + error.message,
+                 std::nullopt, std::nullopt});
         }
         return Result<std::int32_t>::failure(std::move(error));
     }

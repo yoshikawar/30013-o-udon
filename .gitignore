@@ -15,3 +15,6 @@ __pycache__/
 run/
 # token を書く設定ファイル（.env.example は入れる）
 .env
+# Discord の webhook の URL（秘密）
+webhook.txt
+token.txt

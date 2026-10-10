@@ -567,6 +567,17 @@ protocol::Result<SubmissionRecord> SessionController::submit_plan(
     return protocol::Result<SubmissionRecord>::success(record);
 }
 
+bool SessionController::continue_after_unknown_action_post() {
+    std::lock_guard submission_lock(submission_mutex_);
+    if (state_ != SessionState::RecoveryRequired || snapshot_.agent_kinds_unknown) return false;
+    const auto previous = state_;
+    state_ = !current_day_ ? SessionState::WaitingForDay
+        : snapshot_.accepted_days.contains(current_day_->day) ? SessionState::InitialAnswerSubmitted
+                                                              : SessionState::PlanningDay;
+    log_transition(previous, state_, "continue-after-unknown-post");
+    return true;
+}
+
 void SessionController::rebuild_progress() {
     progress_ = {};
     for (const auto& [day, accepted] : snapshot_.accepted_days) {
@@ -849,13 +860,9 @@ protocol::Result<bool> SessionController::restore(const std::filesystem::path& p
         }
         snapshot_ = std::move(loaded);
         rebuild_progress();
-        const bool unknown_submission = snapshot_.agent_kinds_unknown
-            || std::any_of(snapshot_.submissions.begin(), snapshot_.submissions.end(),
-                           [](const auto& submission) {
-                               return !submission.submission_attempted.has_value();
-                           });
-        state_ = unknown_submission ? SessionState::RecoveryRequired
-                                    : SessionState::WaitingForDay;
+        // 結果の分からない日の提出は、あとの提出で上書きできるので止めない。種別だけは止める
+        state_ = snapshot_.agent_kinds_unknown ? SessionState::RecoveryRequired
+                                               : SessionState::WaitingForDay;
         return protocol::Result<bool>::success(true);
     } catch (const Json::exception& error) {
         return protocol::Result<bool>::failure(

@@ -85,7 +85,7 @@ cp .env.example .env && chmod 600 .env   # PROCON_TOKEN / PROCON_ARENA_TOKEN を
 
 LAN worker を使う場合は、主 PC と全 worker を clean worktree かつ同じ commit に揃えてください。build fingerprint は git commit 由来で未commit差分を識別しないため、dirty worktree のままでは worker 構成の同一性を検証できません。worker の詳細な OS 別設定、network、preflight 手順は [docs/lan-worker.md](docs/lan-worker.md) を参照してください。
 
-本番では、`--execute` がなければ POST されません。開始待ちの403が続く環境では `--max-get-retries 200` を推奨します。`waiting-for-match` は正常状態として停止しないでください。Session には試合の識別子（盤の大きさと初期位置）と開始時刻（`startsAt`）を保存し、起動したときに残っている Session が同じ試合のものなら読み込んで途中から入り直し（`session=restored`）、別の試合か最終日まで終わった試合のものなら同じフォルダーの `session-previous-<時刻>.json` に退避して最初から始めます（`session=archived`）。`RecoveryRequired` または POST 結果不明になった場合は、同じ session directory で自動再実行せず、公式状態と `show-state` を確認してから復旧手順を判断します。
+本番では、`--execute` がなければ POST されません。開始待ちの403が続く環境では `--max-get-retries 200` を推奨します。`waiting-for-match` は正常状態として停止しないでください。Session には試合の識別子（盤の大きさと初期位置）と開始時刻（`startsAt`）を保存し、起動したときに残っている Session が同じ試合のものなら読み込んで途中から入り直し（`session=restored`）、別の試合か最終日まで終わった試合のものなら同じフォルダーの `session-previous-<時刻>.json` に退避して最初から始めます（`session=archived`）。日の提出の結果が分からなくても止めずに続けます（下の「1 試合の流れ」の 6.）。`RecoveryRequired` になった場合は、同じ session directory で自動再実行せず、公式状態と `show-state` を確認してから復旧手順を判断します。
 
 公式接続情報は主 PC だけに置き、token と worker secret を Git、チャット、コマンド履歴、スクリーンショットに残さないでください。worker は公式 token/API を使わず、worker 専用 secret で主 PC と通信します。
 
@@ -102,6 +102,8 @@ LAN worker を使う場合は、主 PC と全 worker を clean worktree かつ�
 4. solver が日の締切の `--safety-seconds`（既定 3 秒）前までの残り時間の 85% で計画し、系列・玉・翌日に効く項が良くなるたびに `--interim-ms`（既定 3000）ごとに出し直します。最後の計画が直前に出したものと同じなら出し直しません（回答時間で負けないため）。
    1 日の計画は、乱数の種だけを変えた焼きなましを `--threads` 本同時に回し、一番良い解を使います。`--threads` は日次solverだけでなく、種別決め中の候補のSA探索にも使われます。
 5. 提出する計画はすべて、提出の前に solver のシミュレーター（公式ルールの再現）で確かめます。
+6. 日の提出（保険・出し直し・最後の計画）で、接続を切られた・空の応答・時間切れ・HTTP 5xx などで**送れたかどうか分からない**ときも、止めずに続けます（`warning=daily-post-outcome-unknown ... continuing`、保険なら `warning=safe-wait-outcome-unknown`）。日の提出はあとに出したものが有効になるので、次の出し直しか最後の計画で上書きされます（受け付けられた計画は前のままとして扱うので、最後に同じ計画をもう一度出します）。その日の `daily-end` に `unknownPosts=N` が付き、理由（curl のエラー）は `operations.jsonl` にも残ります。
+   最後の提出が不明のまま日が終わったときは、どちらの計画が使われたか分からないため、手元で数えている系列・玉が少しずれることがあります（次の日の状態はサーバーから受け取るので、計画そのものは正しく続きます）。
 
 内部のheuristic scoreと、公式順位用の `OfficialScore` は別物です。`OfficialScore` は「総系列数 → 日別系列数の合計 → 玉数」の辞書順で比較します。そのため、heuristicだけが小さく改善しても solver-interim は POST せず、strict simulatorで計算した `OfficialScore` が直近に受理された計画より辞書順で厳密に改善した場合だけ POST します。最終日は翌日の価値と、継続用の燃料・終点評価を使いません。種別決めでは通常道路と混雑道路の両条件を見て、翌日の道路状態も計画評価に反映します。
 
@@ -145,7 +147,9 @@ worker は日の締切の 1 秒前（`--lan-worker-timeout-ms` で上限を指�
 
 ## 4. 異常時と復旧
 
-- POST の前に失敗した提出は `submissionAttempted=false`、POST したが結果が分からないものは `null` として Session に残し、`null` が出たら `RecoveryRequired` で止まります（自動で送り直しません）。
+- POST の前に失敗した提出は `submissionAttempted=false`、POST したが結果が分からないものは `null` として Session に残します。
+  - 日の提出が `null` のときは止めずに続けます（あとの提出で上書きできるため）。`null` が残った Session から入り直しても続けます（`warning=restored-unknown-daily-posts`）。
+  - 種別（`POST /agent`）が `null` のときだけ、どの種別で試合が進むか分からないので `RecoveryRequired` で止まります。
 - `RecoveryRequired` のあとは同じ Session で `auto` を再実行せず、`show-state` と公式の状態を照らし合わせてから `recover`（既定は dry-run）を使います。止まった理由は `run/log/operations.jsonl` の末尾にあります（`tail -n 5 run/log/operations.jsonl`）。
 - 試合の途中で client を止めた・落ちたときは、同じ `--session-dir` で `auto` を起動し直せば、同じ試合として入り直します（種別は送り直さず、受理済みの日も引き継ぎます）。
 - 種別が受け付けられなかった（締切を過ぎた・断られた）ときは止まらずに全員巡回車として進みます。送ったかどうか分からないときだけ止まります。
