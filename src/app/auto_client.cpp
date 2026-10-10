@@ -536,12 +536,10 @@ RunResult AutoCompetitionClient::run() {
         }
     }
     // 種別の締切。設定を受け取った時刻から数え、startsAt（1 日目が始まる時刻）の方が早ければそこまで
-    auto deadline_seconds = kind_deadline_seconds(setting.value().map.width());
-    const auto received = std::chrono::duration_cast<std::chrono::seconds>(
-        setting_received_at.time_since_epoch()).count();
-    if (setting.value().starts_at > received)
-        deadline_seconds = std::min<std::int64_t>(deadline_seconds, setting.value().starts_at - received);
-    const auto kind_deadline = setting_received_at + std::chrono::seconds{deadline_seconds};
+    auto kind_deadline = setting_received_at + std::chrono::seconds{kind_deadline_seconds(setting.value().map.width())};
+    if (setting.value().starts_at > 0)
+        kind_deadline = std::min(kind_deadline, std::chrono::system_clock::time_point{
+            std::chrono::seconds{setting.value().starts_at}});
     std::vector<core::AgentKind> selected_kinds;
     if (initial.snapshot().submitted_agent_kinds) {
         selected_kinds = *initial.snapshot().submitted_agent_kinds;
@@ -554,14 +552,26 @@ RunResult AutoCompetitionClient::run() {
         selected_kinds = *config_.explicit_kinds;
         output_ << "type-selection=explicit\n";
     } else {
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            clock_.wall_now() - setting_received_at).count();
+        // 締切までの残りをミリ秒で数える
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            kind_deadline - clock_.wall_now()).count();
+        // POST の分として、--safety-seconds（既定 3 秒）か残りの半分の短い方を残す
+        const auto reserve = std::min<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin).count(),
+            std::max<std::int64_t>(0, remaining) / 2);
         const auto budget = config_.kind_budget.count() > 0 ? config_.kind_budget.count()
-            : std::max<std::int64_t>(1000, deadline_seconds * 1000 - elapsed
-                - std::chrono::duration_cast<std::chrono::milliseconds>(config_.safety_margin).count());
-        output_ << "type-selection=start mode=solver budgetMs=" << budget << '\n';
-        // procon2026 の solver と同じく持ち時間の 8 割で選ぶ
-        const auto kinds = solver::solveKind(static_cast<double>(budget) * 0.5);
+            : std::max<std::int64_t>(0, remaining - reserve);
+        std::vector<int> kinds;
+        // 持ち時間の半分で選ぶ（各候補に焼きなましを回す）。残りは 1 日目の先読みに使う。
+        // 半分が 300ms に満たないときは焼きなましをせず、補給車 1 台の候補のうち中心に近いものをすぐ出す
+        // （締切に間に合わず種別が届かないと、全員が巡回車になるため）
+        if (budget / 2 < 300 && config_.kind_budget.count() == 0) {
+            kinds = solver::kindCandidates().front();
+            output_ << "type-selection=start mode=quick remainingMs=" << remaining << '\n';
+        } else {
+            output_ << "type-selection=start mode=solver budgetMs=" << budget << " remainingMs=" << remaining << '\n';
+            kinds = solver::solveKind(static_cast<double>(budget) * 0.5);
+        }
         solver::choosingKinds = false;
         for (const int kind : kinds) selected_kinds.push_back(static_cast<core::AgentKind>(kind));
         protocol::OperationLogEntry selector_log;

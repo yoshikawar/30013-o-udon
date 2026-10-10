@@ -312,9 +312,15 @@ protocol::Result<bool> SessionController::submit_agent_kinds(
         return protocol::Result<bool>::failure(
             {protocol::ErrorCode::CoreValidation, "agent kind count does not match setting"});
     }
-    if (config_.starts_at != 0) {
+    // startsAt（1 日目が始まる時刻）を過ぎたら種別は受け付けられない。
+    // 競技サーバーは種別の受付中から startsAt を入れて返すので、0 でないことでは判定しない。
+    // ここでは POST していないので、送っていない（false）として返す
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (config_.starts_at != 0 && now >= config_.starts_at) {
         return protocol::Result<bool>::failure(
-            {protocol::ErrorCode::Conflict, "agent kinds cannot be submitted after start is fixed"});
+            {protocol::ErrorCode::Conflict, "agent kinds cannot be submitted after the match started",
+             std::nullopt, false});
     }
     if (snapshot_.submitted_agent_kinds) {
         if (*snapshot_.submitted_agent_kinds == kinds) {
