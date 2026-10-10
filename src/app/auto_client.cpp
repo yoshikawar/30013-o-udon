@@ -7,6 +7,9 @@
 #include "hexa_udon/protocol/request_id_digest.hpp"
 
 #include <algorithm>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <charconv>
 #include <iostream>
 #include <iomanip>
@@ -154,6 +157,39 @@ nlohmann::json canonical_planner_input(const core::MatchConfig& config,
             {"progress", {{"acquiredBrands", acquired}, {"totalBalls", progress.total_balls},
                            {"dailyDistinctBrandCounts", progress.daily_distinct_brand_counts}}},
             {"types", type_values}, {"plannerSeed", seed}, {"workerBudgetMs", worker_budget_ms}};
+}
+
+// 保存してある session が別の試合のものか。盤・初期位置・開始時刻（両方 0 でないとき）のどれかが違うか、
+// 最終日まで受理済み（試合が終わっている）なら別の試合とみなす。読めないときは false（restore に任せる）
+bool session_belongs_to_another_match(const std::filesystem::path& path, const std::string& match_id,
+                                      const core::MatchConfig& config) {
+    try {
+        std::ifstream input(path, std::ios::binary);
+        const auto root = nlohmann::json::parse(input);
+        if (root.value("matchId", std::string{}) != match_id) return true;
+        const auto stored_starts_at = root.value("startsAt", core::UnixTimestamp{0});
+        if (stored_starts_at != 0 && config.starts_at != 0 && stored_starts_at != config.starts_at) return true;
+        const auto last_day = static_cast<std::int64_t>(config.day_steps.size()) - 1;
+        for (const auto& accepted : root.value("acceptedDays", nlohmann::json::array()))
+            if (accepted.value("day", std::int64_t{-1}) == last_day) return true;
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+// 別の試合の session を同じ directory の session-previous-<時刻>.json に移す（directory はロックしているので動かさない）
+std::filesystem::path archive_session_file(const std::filesystem::path& path) {
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+    localtime_r(&now, &local);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+    auto target = path.parent_path() / ("session-previous-" + std::string(stamp) + ".json");
+    for (int suffix = 1; std::filesystem::exists(target); ++suffix)
+        target = path.parent_path() / ("session-previous-" + std::string(stamp) + "-" + std::to_string(suffix) + ".json");
+    std::filesystem::rename(path, target);
+    return target;
 }
 
 }  // namespace
@@ -519,7 +555,14 @@ RunResult AutoCompetitionClient::run() {
 
     const auto state_path = config_.state_directory / "session.json";
     session::SessionController initial(api_, setting.value(), nullptr, logger_);
+    // 別の試合の session が残っていたら退避して、最初から始める。同じ試合なら読み込んで途中から入り直す
+    if (std::filesystem::exists(state_path)
+        && session_belongs_to_another_match(state_path, initial.match_id(), setting.value())) {
+        const auto archived = archive_session_file(state_path);
+        output_ << "session=archived reason=another-match file=" << archived.filename().string() << '\n';
+    }
     if (std::filesystem::exists(state_path)) {
+        output_ << "session=restored (same match)\n";
         auto restored = initial.restore(state_path);
         if (!restored) return {RunStatus::RecoveryRequired, restored.error().message};
         if (has_unknown_submission(initial.snapshot())) {
@@ -562,10 +605,14 @@ RunResult AutoCompetitionClient::run() {
         const auto budget = config_.kind_budget.count() > 0 ? config_.kind_budget.count()
             : std::max<std::int64_t>(0, remaining - reserve);
         std::vector<int> kinds;
+        // 締切（startsAt）をもう過ぎていたら種別は受け付けられないので、選ばずに全員を巡回車として進む。
         // 持ち時間の半分で選ぶ（各候補に焼きなましを回す）。残りは 1 日目の先読みに使う。
         // 半分が 300ms に満たないときは焼きなましをせず、補給車 1 台の候補のうち中心に近いものをすぐ出す
         // （締切に間に合わず種別が届かないと、全員が巡回車になるため）
-        if (budget / 2 < 300 && config_.kind_budget.count() == 0) {
+        if (remaining <= 0 && config_.kind_budget.count() == 0) {
+            kinds.assign(setting.value().initial_agent_positions.size(), 0);
+            output_ << "type-selection=skipped reason=deadline-passed remainingMs=" << remaining << '\n';
+        } else if (budget / 2 < 300 && config_.kind_budget.count() == 0) {
             kinds = solver::kindCandidates().front();
             output_ << "type-selection=start mode=quick remainingMs=" << remaining << '\n';
         } else {
@@ -594,16 +641,20 @@ RunResult AutoCompetitionClient::run() {
     if (config_.mode == RunMode::Execute && !initial.snapshot().submitted_agent_kinds) {
         auto submitted = initial.submit_agent_kinds(selected_kinds,
             std::optional<protocol::SteadyTime>{clock_.now() + config_.type_submission_reserve});
-        if (!submitted) {
-            const auto saved_failure = initial.save(state_path);
-            if (!saved_failure) return {RunStatus::Failed, saved_failure.error().message};
-            return {!submitted.error().submission_attempted.has_value()
-                        ? RunStatus::RecoveryRequired : RunStatus::Failed,
-                    submitted.error().message};
-        }
-        auto saved = initial.save(state_path);
+        const auto saved = initial.save(state_path);
         if (!saved) return {RunStatus::Failed, saved.error().message};
-        output_ << "post=agent-types success\n";
+        if (!submitted) {
+            // 送ったかどうか分からないときだけ止める（受け付けられていれば種別が違ってしまうため）
+            if (!submitted.error().submission_attempted.has_value())
+                return {RunStatus::RecoveryRequired, submitted.error().message};
+            // 送らなかった・断られた（受け付けられていないのが確か）。公式のルールでは種別が届かなければ
+            // 全員が巡回車になるので、止まらずにそのつもりで毎日の計画へ進む
+            output_ << "warning=agent-types-not-accepted reason=\"" << submitted.error().message
+                    << "\" continuing-as=all-patrol\n";
+            selected_kinds.assign(selected_kinds.size(), core::AgentKind::Patrol);
+        } else {
+            output_ << "post=agent-types success\n";
+        }
     } else if (config_.mode == RunMode::DryRun) {
         output_ << "post=agent-types dry-run\n";
     }

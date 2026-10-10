@@ -203,8 +203,10 @@ public:
         std::chrono::steady_clock::time_point steady_now,
         std::chrono::seconds safety_margin = std::chrono::seconds{5}) const;
 
-private:
+    // 盤の大きさと初期位置からなる試合の識別子（session.json の matchId）
     [[nodiscard]] std::string match_id() const;
+
+private:
     [[nodiscard]] protocol::Result<simulator::DaySimulationResult> simulate(
         const simulator::DayActionPlan& plan) const;
     void rebuild_progress();

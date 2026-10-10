@@ -328,6 +328,7 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
     int T = max(1, threads);
     if (T == 1) {
         Planner p(st, status, steps, lastDay);
+        p.verbose = !choosingKinds;
         p.warm = warm;
         auto plan = p.plan(timeMs);
         return {p.result, plan};
@@ -343,7 +344,7 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
             rng.x ^= (uint64_t)k * 0x9E3779B97F4A7C15ULL;
             Planner p(st, status, steps, lastDay);
             p.emitted = &emitted;
-            p.verbose = k == 0;
+            p.verbose = k == 0 && !choosingKinds;
             p.warm = warm;
             plans[k] = p.plan(timeMs);
             results[k] = p.result;
@@ -351,7 +352,8 @@ pair<Planner::Solution, vector<vector<int>>> solveDay(const vector<Agent>& st, c
     for (auto& w : workers) w.join();
     int bestK = 0;
     for (int k = 1; k < T; k++) if (results[k].score > results[bestK].score) bestK = k;
-    cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score << "\n";
+    // 種別決めの中では solver のログを出さない（候補 × 日数 × 2 通りぶん出て読めなくなるため）
+    if (!choosingKinds) cerr << "[solver] threads=" << T << " best=" << bestK << " score=" << results[bestK].score << "\n";
     if (results[bestK].score < -1e17) return {results[bestK], plans[0]};
     // 出し直した計画より良くなっていなければ、出し直した計画をそのまま返す（回答時間で負けないため）
     if (interimSec > 0 && emitted.lasting + EMIT_MIN_GAIN > results[bestK].lasting) return {results[bestK], emitted.plan};

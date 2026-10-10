@@ -19,10 +19,10 @@ ctest --test-dir build-release --output-on-failure
 
 ## 2. 実行
 
-token と URL は環境変数で渡し、README や Git に実値を書きません。
+token と URL は環境変数（または `.env`、下記）で渡し、README や Git に実値を書きません。token は公式の形式どおり、URL の `?token=` で送ります。
 
 ```bash
-export VENUE_BASE_URL='https://<venue-host>'
+export VENUE_BASE_URL='http://172.28.0.10:8080'
 export PROCON_TOKEN='<official-token>'
 ```
 
@@ -40,7 +40,30 @@ export PROCON_TOKEN='<official-token>'
   --session-dir /secure/runtime/session --log-dir /secure/runtime/log
 ```
 
-練習場（procon37arena.online）では `practice.sh` が build・待機・Session の退避・`auto --execute` をまとめて行います。
+### practice.sh（build・待機・Session の退避・`auto --execute` をまとめて行う）
+
+| コマンド | つなぐ先 | token を読む環境変数 |
+| --- | --- | --- |
+| `./practice.sh` | 公式の試合（既定 `http://172.28.0.10:8080`。`VENUE_BASE_URL` があればそちら） | `PROCON_TOKEN` |
+| `./practice.sh --arena` | 練習場（`https://procon37arena.online`） | `PROCON_ARENA_TOKEN`（公式の token を外へ送らないため別にする） |
+| `./practice.sh --base-url URL` | 指定したサーバー | `PROCON_TOKEN` |
+
+- `--wait N` で `/setting` を待つ秒数を変えます（既定 180）。試合が始まる前に起動しておけば、`/setting` が出るまで待ちます
+- ほかの引数はそのまま `hexa_udon auto` に渡します（例: `./practice.sh --threads 8`）
+- `./practice.sh --help` で使い方を表示します
+
+token は `.env`（practice.sh と同じフォルダー）に書いておけます。`.env` は Git に入りません。
+
+```bash
+cp .env.example .env && chmod 600 .env   # PROCON_TOKEN / PROCON_ARENA_TOKEN を書く
+```
+
+`.env` は `KEY=値` の行だけを読み、シェルとしては実行しません。すでに設定されている環境変数があればそちらを使います。権限が 600 でないと警告します。`hexa_udon` を直接打つときは `.env` を読まないので `export` してください。
+
+### ログ
+
+- 画面に出る内容（標準出力・標準エラー）は、`--log-dir`（既定 `run/log`）の `client-output-<起動時刻>.log` にも自動で残ります（`tee` は不要。最初の行に `client-log=...` と場所が出ます）
+- HTTP の結果や `RecoveryRequired` の理由は、同じフォルダーの `operations.jsonl` に残ります（`result=` の行には理由が出ません）
 
 ### 本番運用の方針
 
@@ -48,15 +71,19 @@ export PROCON_TOKEN='<official-token>'
 
 LAN worker を使う場合は、主 PC と全 worker を clean worktree かつ同じ commit に揃えてください。build fingerprint は git commit 由来で未commit差分を識別しないため、dirty worktree のままでは worker 構成の同一性を検証できません。worker の詳細な OS 別設定、network、preflight 手順は [docs/lan-worker.md](docs/lan-worker.md) を参照してください。
 
-本番では、`--execute` がなければ POST されません。開始待ちの403が続く環境では `--max-get-retries 200` を推奨します。本番runごとに新しい session/log directory を使い、`waiting-for-match` は正常状態として停止しないでください。`RecoveryRequired` または POST 結果不明になった場合は、同じ session directory で自動再実行せず、公式状態と `show-state` を確認してから復旧手順を判断します。
+本番では、`--execute` がなければ POST されません。開始待ちの403が続く環境では `--max-get-retries 200` を推奨します。`waiting-for-match` は正常状態として停止しないでください。Session には試合の識別子（盤の大きさと初期位置）と開始時刻（`startsAt`）を保存し、起動したときに残っている Session が同じ試合のものなら読み込んで途中から入り直し（`session=restored`）、別の試合か最終日まで終わった試合のものなら同じフォルダーの `session-previous-<時刻>.json` に退避して最初から始めます（`session=archived`）。`RecoveryRequired` または POST 結果不明になった場合は、同じ session directory で自動再実行せず、公式状態と `show-state` を確認してから復旧手順を判断します。
 
 公式接続情報は主 PC だけに置き、token と worker secret を Git、チャット、コマンド履歴、スクリーンショットに残さないでください。worker は公式 token/API を使わず、worker 専用 secret で主 PC と通信します。
 
 ### 1 試合の流れ
 
 1. `GET /setting` を受け取ったら、solver が種別（どの車を補給車にするか）を決めて `POST /agent` します。
-   開始前の予算の 50% を種別決めに使い、残りを day0 precompute に回します（`--kind-ms` で上書きできます）。実際の配分は実装で変わる可能性があるため、CLI ログの `budgetMs` で確認してください。
-2. 種別を出したら、締切（startsAt が分かればその時刻）まで別のスレッドで 1 日目を計画しておきます。1 日目の道路は全部空いていて、朝の状態も種別で決まるためです。1 日目はこの解から始めるので、1 日目の最初の提出から良い計画を出せます（回答時間が短くなる）。途中から入り直したときはしません。
+   - 締切は「`startsAt`」と「`/setting` を受け取った時刻 + 盤の大きさごとの種別の時間（16×16 / 24×24 / 32×32 で 60 / 90 / 120 秒）」の早い方です。残りをミリ秒で数えます
+   - POST の分として `--safety-seconds`（既定 3 秒）か残りの半分の短い方を残し、その手前までを持ち時間にします。持ち時間の半分で種別を決め（各候補に焼きなましを回す）、決まったらすぐ POST します。残りは 1 日目の先読みに回します（`--kind-ms` で持ち時間を上書きできます。ログの `budgetMs` / `remainingMs` で確認できます）
+   - 持ち時間の半分が 300ms に満たないときは焼きなましをせず、補給車 1 台の候補のうち中心に近いものをすぐ送ります（`type-selection=start mode=quick`）
+   - 締切をもう過ぎていたら種別決めを省きます（`type-selection=skipped`）。種別が受け付けられなかった（送らなかった・断られた）ときは、公式のルールどおり全員が巡回車になるので、止まらずにそのつもりで毎日の計画へ進みます（`warning=agent-types-not-accepted ... continuing-as=all-patrol`）。送ったかどうか分からないときだけ `RecoveryRequired` で止まります
+   - 種別決めの中では solver の `[solver]` ログは出さず、候補ごとの `[kind]` だけを出します
+2. 種別を出したら、上の締切まで別のスレッドで 1 日目を計画しておきます。1 日目の道路は全部空いていて、朝の状態も種別で決まるためです。1 日目はこの解から始めるので、1 日目の最初の提出から良い計画を出せます（回答時間が短くなる）。途中から入り直したときはしません。
 3. 毎日、まず全員が待つ計画を出します（計画ができるまでの保険）。
 4. solver が日の締切の `--safety-seconds`（既定 3 秒）前までの残り時間の 85% で計画し、系列・玉・翌日に効く項が良くなるたびに `--interim-ms`（既定 3000）ごとに出し直します。最後の計画が直前に出したものと同じなら出し直しません（回答時間で負けないため）。
    1 日の計画は、乱数の種だけを変えた焼きなましを `--threads` 本同時に回し、一番良い解を使います。`--threads` は日次solverだけでなく、種別決め中の候補のSA探索にも使われます。
@@ -77,7 +104,7 @@ LAN worker を使う場合は、主 PC と全 worker を clean worktree かつ�
 | `--max-get-retries N` | `/setting` や日次状態のGET再試行回数（既定 8）。練習場など開始待ちで403が続く環境では 200 を推奨 |
 | `--lan-worker-timeout-ms N` | LAN worker の応答待ち上限。指定可能範囲などの詳細は [docs/lan-worker.md](docs/lan-worker.md) を参照 |
 | `--seed N` | LAN worker に渡す乱数の種のもと |
-| `--session-dir DIR` / `--log-dir DIR` | Session と OperationLog の置き場所（既定 `run/session`, `run/log`） |
+| `--session-dir DIR` / `--log-dir DIR` | Session と、OperationLog（`operations.jsonl`）・画面の出力（`client-output-<時刻>.log`）の置き場所（既定 `run/session`, `run/log`） |
 
 `hexa_udon --help` で全 option を表示します。
 
@@ -105,7 +132,9 @@ worker は日の締切の 1 秒前（`--lan-worker-timeout-ms` で上限を指�
 ## 4. 異常時と復旧
 
 - POST の前に失敗した提出は `submissionAttempted=false`、POST したが結果が分からないものは `null` として Session に残し、`null` が出たら `RecoveryRequired` で止まります（自動で送り直しません）。
-- `RecoveryRequired` のあとは同じ Session で `auto` を再実行せず、`show-state` と公式の状態を照らし合わせてから `recover`（既定は dry-run）を使います。
+- `RecoveryRequired` のあとは同じ Session で `auto` を再実行せず、`show-state` と公式の状態を照らし合わせてから `recover`（既定は dry-run）を使います。止まった理由は `run/log/operations.jsonl` の末尾にあります（`tail -n 5 run/log/operations.jsonl`）。
+- 試合の途中で client を止めた・落ちたときは、同じ `--session-dir` で `auto` を起動し直せば、同じ試合として入り直します（種別は送り直さず、受理済みの日も引き継ぎます）。
+- 種別が受け付けられなかった（締切を過ぎた・断られた）ときは止まらずに全員巡回車として進みます。送ったかどうか分からないときだけ止まります。
 
 ```bash
 ./build-release/hexa_udon show-state --session-dir /secure/runtime/session

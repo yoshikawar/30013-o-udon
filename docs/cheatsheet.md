@@ -236,4 +236,4 @@ ctest --test-dir build-release --output-on-failure
 ./build-release/hexa_udon --help
 ```
 
-`practice.sh` は任意のCLI引数を自動転送しない。練習場で `--threads`、`--lan-worker`、`--max-get-retries` などを変更する場合は、スクリプトの `run_client` 内にある `auto` コマンドを編集する。
+`practice.sh` は既定で公式の試合（`http://172.28.0.10:8080`、`VENUE_BASE_URL` で変えられる）につなぎ、`--arena` で練習場につなぐ（token は `PROCON_ARENA_TOKEN`）。`--base-url URL`・`--wait 秒` 以外の引数はそのまま `auto` に渡すので、`./practice.sh --threads 8 --lan-worker 192.168.1.12:39001` のように付けられる。token は `.env`（`.env.example` をコピー）に書いておける。
